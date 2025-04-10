@@ -14,7 +14,7 @@ services:
     restart: unless-stopped
     environment:
       - PYTHONUNBUFFERED=1
-    container_name: omrchecker-api
+    container_name: omrchecker
 
 volumes:
   omr_results: 
