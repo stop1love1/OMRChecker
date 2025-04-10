@@ -415,11 +415,13 @@ OMRChecker/
 ├── inputs/                 # Thư mục đầu vào, API sẽ lưu template và ảnh tại đây
 │   ├── directory_name_1/   # Mỗi bộ OMR sẽ được lưu trong một thư mục riêng biệt
 │   │   ├── template.json   # Tệp template cho bộ OMR
+│   │   ├── marker.jpg      # Tệp ảnh marker (tùy chọn)
 │   │   └── image1.jpg      # Các ảnh OMR được quét
 │   │   └── image2.jpg      
 │   │
 │   └── directory_name_2/   # Một bộ OMR khác
 │       ├── template.json
+│       ├── marker.png      # Có thể có hoặc không
 │       └── image3.jpg
 │
 ├── outputs/                # Thư mục đầu ra, kết quả xử lý OMR sẽ được lưu ở đây
@@ -445,6 +447,7 @@ Tất cả API endpoints đều có tiền tố `/api`.
 
 **Parameters:**
 - `template_file` (required): Tệp JSON định nghĩa bố cục OMR
+- `marker_file` (optional): Tệp ảnh marker dùng để đánh dấu vị trí, lưu cùng thư mục với template
 - `image_files` (required): Các tệp ảnh OMR (định dạng PNG, JPG, JPEG), có thể chọn nhiều file
 - `directory_name` (required): Tên thư mục sẽ được tạo trong thư mục inputs (không được chứa dấu / hoặc \)
 - `include_images` (optional, default: false): Có kèm theo hình ảnh đã xử lý dưới dạng base64 hay không
@@ -456,6 +459,7 @@ Tất cả API endpoints đều có tiền tố `/api`.
 curl -X POST "http://localhost:5000/api/process-omr" \
   -H "Content-Type: multipart/form-data" \
   -F "template_file=@/path/to/template.json" \
+  -F "marker_file=@/path/to/marker_image.jpg" \
   -F "image_files=@/path/to/image1.jpg" \
   -F "image_files=@/path/to/image2.jpg" \
   -F "directory_name=my_omr_test" \
@@ -617,6 +621,7 @@ import os
 
 # Đường dẫn đến template và ảnh
 template_path = "path/to/template.json"
+marker_path = "path/to/marker_image.jpg"  # Tùy chọn
 image_paths = ["path/to/image1.jpg", "path/to/image2.jpg"]
 directory_name = "test_omr_batch"
 
@@ -625,6 +630,10 @@ url = "http://localhost:5000/api/process-omr"
 files = {
     'template_file': open(template_path, 'rb')
 }
+
+# Thêm marker file nếu có
+if os.path.exists(marker_path):
+    files['marker_file'] = open(marker_path, 'rb')
 
 # Thêm nhiều file ảnh với cùng một key
 for i, image_path in enumerate(image_paths):

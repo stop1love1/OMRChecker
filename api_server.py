@@ -102,6 +102,11 @@ upload_parser.add_argument('template_file',
                           type=FileStorage, 
                           required=True,
                           help='JSON template file')
+upload_parser.add_argument('marker_file', 
+                          location='files',
+                          type=FileStorage, 
+                          required=False,
+                          help='Marker image file for template (PNG, JPG, JPEG)')
 upload_parser.add_argument('image_files', 
                           location='files',
                           type=FileStorage, 
@@ -226,6 +231,7 @@ class ProcessOMR(Resource):
         args = upload_parser.parse_args()
         
         template_file = args['template_file']
+        marker_file = args['marker_file']
         image_files = args['image_files']
         directory_name = args['directory_name']
         include_images = args['include_images']
@@ -235,6 +241,11 @@ class ProcessOMR(Resource):
         # Validate template file
         if not template_file.filename.endswith('.json'):
             return {'error': 'Template file must be a JSON file'}, 400
+        
+        # Validate marker file if provided
+        if marker_file and not any(marker_file.filename.lower().endswith(ext) 
+                      for ext in ['.png', '.jpg', '.jpeg']):
+            return {'error': f'Marker file {marker_file.filename} must be a PNG, JPG, or JPEG file'}, 400
         
         # Validate image files
         for image_file in image_files:
@@ -276,6 +287,12 @@ class ProcessOMR(Resource):
             template_path = os.path.join(input_dir, 'template.json')
             template_file.save(template_path)
             logger.info(f"Saved template file to {template_path}")
+            
+            # Save marker file if provided
+            if marker_file:
+                marker_path = os.path.join(input_dir, marker_file.filename)
+                marker_file.save(marker_path)
+                logger.info(f"Saved marker file to {marker_path}")
             
             # Save all image files with original filenames
             image_paths = []

@@ -40,6 +40,12 @@
                     </div>
                     
                     <div class="mb-3">
+                        <label for="markerFile" class="form-label">Marker Image (optional)</label>
+                        <input type="file" class="form-control" id="markerFile" accept=".png,.jpg,.jpeg">
+                        <div class="form-text">Upload an image to be used as a marker, will be stored with the template</div>
+                    </div>
+                    
+                    <div class="mb-3">
                         <label for="imageFile" class="form-label">OMR Image</label>
                         <input type="file" class="form-control" id="imageFile" accept=".png,.jpg,.jpeg" multiple required>
                         <div class="form-text">You can select multiple image files</div>
@@ -160,6 +166,12 @@
                 
                 const formData = new FormData();
                 formData.append('template_file', document.getElementById('templateFile').files[0]);
+                
+                // Add marker file if selected
+                const markerFile = document.getElementById('markerFile').files[0];
+                if (markerFile) {
+                    formData.append('marker_file', markerFile);
+                }
                 
                 // Handle multiple image files
                 const imageFiles = document.getElementById('imageFile').files;
