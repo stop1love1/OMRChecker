@@ -445,38 +445,45 @@ Tất cả API endpoints đều có tiền tố `/api`.
 
 **Parameters:**
 - `template_file` (required): Tệp JSON định nghĩa bố cục OMR
-- `image_file` (required): Tệp ảnh OMR (định dạng PNG, JPG, JPEG)
+- `image_files` (required): Các tệp ảnh OMR (định dạng PNG, JPG, JPEG), có thể chọn nhiều file
 - `directory_name` (required): Tên thư mục sẽ được tạo trong thư mục inputs (không được chứa dấu / hoặc \)
 - `include_images` (optional, default: false): Có kèm theo hình ảnh đã xử lý dưới dạng base64 hay không
+- `clean_before` (optional, default: true): Xóa thư mục inputs và outputs trước khi xử lý nếu đã tồn tại
+- `clean_after` (optional, default: false): Xóa thư mục inputs và outputs sau khi xử lý và lưu kết quả
 
 **Ví dụ sử dụng curl:**
 ```bash
 curl -X POST "http://localhost:5000/api/process-omr" \
   -H "Content-Type: multipart/form-data" \
   -F "template_file=@/path/to/template.json" \
-  -F "image_file=@/path/to/omr_image.jpg" \
-  -F "directory_name=my_omr_test"
+  -F "image_files=@/path/to/image1.jpg" \
+  -F "image_files=@/path/to/image2.jpg" \
+  -F "directory_name=my_omr_test" \
+  -F "clean_before=true" \
+  -F "clean_after=false"
 ```
 
 **Phản hồi:**
 ```json
 {
-  "message": "OMR processing completed successfully",
-  "result_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-  "input_dir": "inputs/my_omr_test",
-  "output_dir": "outputs/my_omr_test",
-  "csv_file": "Results_05AM.csv",
-  "result": {
-    "file_id": "omr_image.jpg",
-    "input_path": "...",
-    "output_path": "...",
-    "score": 0,
-    "answers": [
-      {"key": "q1", "value": "A"},
-      {"key": "q2", "value": "B"},
-      {"key": "q3", "value": "C"}
-    ]
-  }
+  "results": [
+    {
+      "file_id": "image1.jpg",
+      "score": 0,
+      "answers": [
+        {"key": "q1", "value": "A"},
+        {"key": "q2", "value": "B"}
+      ]
+    },
+    {
+      "file_id": "image2.jpg",
+      "score": 0,
+      "answers": [
+        {"key": "q1", "value": "C"},
+        {"key": "q2", "value": "D"}
+      ]
+    }
+  ]
 }
 ```
 
@@ -610,18 +617,24 @@ import os
 
 # Đường dẫn đến template và ảnh
 template_path = "path/to/template.json"
-image_path = "path/to/image.jpg"
+image_paths = ["path/to/image1.jpg", "path/to/image2.jpg"]
 directory_name = "test_omr_batch"
 
 # Gửi yêu cầu xử lý OMR
 url = "http://localhost:5000/api/process-omr"
 files = {
-    'template_file': open(template_path, 'rb'),
-    'image_file': open(image_path, 'rb')
+    'template_file': open(template_path, 'rb')
 }
+
+# Thêm nhiều file ảnh với cùng một key
+for i, image_path in enumerate(image_paths):
+    files[f'image_files'] = open(image_path, 'rb')
+
 data = {
     'directory_name': directory_name,
-    'include_images': True
+    'include_images': True,
+    'clean_before': True,  # Xóa thư mục trước khi xử lý
+    'clean_after': False   # Giữ lại thư mục sau khi xử lý
 }
 
 response = requests.post(url, files=files, data=data)
@@ -632,7 +645,7 @@ print(f"- ID kết quả: {result['result_id']}")
 print(f"- Thư mục đầu vào: {result['input_dir']}")
 print(f"- Thư mục đầu ra: {result['output_dir']}")
 print(f"- Tệp CSV: {result['csv_file']}")
-print(f"- Kết quả: {result['result']}")
+print(f"- Số kết quả: {len(result['results'])}")
 
 # Tải xuống tệp CSV kết quả
 if 'result_id' in result:
@@ -650,7 +663,7 @@ if 'result_id' in result:
 async function processOMR() {
   const formData = new FormData();
   formData.append('template_file', document.getElementById('templateFile').files[0]);
-  formData.append('image_file', document.getElementById('imageFile').files[0]);
+  formData.append('image_files', document.getElementById('imageFiles').files);
   formData.append('directory_name', 'js_test');
 
   const response = await fetch('http://localhost:5000/api/process-omr', {
@@ -678,26 +691,40 @@ async function processOMR() {
    - Tiếp theo là các file `Results_*.csv` ở bất kì vị trí nào
    - Cuối cùng sẽ sử dụng bất kỳ file CSV nào không phải là ErrorFiles.csv
 
-3. Kết quả JSON trả về được chuyển đổi sang định dạng có mảng `answers` để dễ dàng xử lý:
+3. Kết quả JSON trả về được chuyển đổi sang định dạng có mảng `answers` để dễ dàng xử lý. API trả về mảng kết quả với mỗi kết quả tương ứng với một file ảnh đã xử lý:
    ```json
    {
-     "file_id": "omr_image.jpg",
-     "score": 0,
-     "answers": [
-       {"key": "q1", "value": "A"},
-       {"key": "q2", "value": "B"}
+     "results": [
+       {
+         "file_id": "image1.jpg",
+         "score": 0,
+         "answers": [
+           {"key": "q1", "value": "A"},
+           {"key": "q2", "value": "B"}
+         ]
+       },
+       {
+         "file_id": "image2.jpg",
+         "score": 0,
+         "answers": [
+           {"key": "q1", "value": "C"},
+           {"key": "q2", "value": "D"}
+         ]
+       }
      ]
    }
    ```
 
-4. Các tệp đã tải lên sẽ vẫn còn trong thư mục `inputs`, bạn có thể chạy lại quá trình xử lý trực tiếp với OMRChecker bằng cách sử dụng lệnh:
+4. Bạn có thể chọn xóa thư mục đầu vào và đầu ra trước khi xử lý (để tránh trùng lặp) và sau khi xử lý (để tiết kiệm không gian) bằng cách sử dụng tham số `clean_before` và `clean_after`.
+
+5. Các tệp đã tải lên sẽ vẫn còn trong thư mục `inputs` nếu bạn không sử dụng tham số `clean_after=true`. Bạn có thể chạy lại quá trình xử lý trực tiếp với OMRChecker bằng cách sử dụng lệnh:
    ```
    python main.py -i inputs/{directory_name}
    ```
 
-5. Đối với Docker, kết quả xử lý sẽ mất đi khi container bị xóa nếu không mount volumes. Khi cần lưu trữ lâu dài, hãy sử dụng:
+6. Đối với Docker, kết quả xử lý sẽ mất đi khi container bị xóa nếu không mount volumes. Khi cần lưu trữ lâu dài, hãy sử dụng:
    ```
    docker run -d --name omrchecker-api -p 5000:5000 -v ./inputs:/app/inputs -v ./outputs:/app/outputs -v ./static:/app/static omrchecker-api
    ```
 
-6. Đối với môi trường sản xuất, nên bổ sung xác thực và giới hạn tốc độ yêu cầu.
+7. Đối với môi trường sản xuất, nên bổ sung xác thực và giới hạn tốc độ yêu cầu.

@@ -41,7 +41,8 @@
                     
                     <div class="mb-3">
                         <label for="imageFile" class="form-label">OMR Image</label>
-                        <input type="file" class="form-control" id="imageFile" accept=".png,.jpg,.jpeg" required>
+                        <input type="file" class="form-control" id="imageFile" accept=".png,.jpg,.jpeg" multiple required>
+                        <div class="form-text">You can select multiple image files</div>
                     </div>
                     
                     <div class="mb-3">
@@ -52,6 +53,18 @@
                     <div class="mb-3 form-check">
                         <input type="checkbox" class="form-check-input" id="includeImages">
                         <label class="form-check-label" for="includeImages">Include processed images</label>
+                    </div>
+                    
+                    <div class="mb-3 form-check">
+                        <input type="checkbox" class="form-check-input" id="cleanBefore" checked>
+                        <label class="form-check-label" for="cleanBefore">Clean directories before processing</label>
+                        <div class="form-text">Delete existing input and output directories before processing</div>
+                    </div>
+                    
+                    <div class="mb-3 form-check">
+                        <input type="checkbox" class="form-check-input" id="cleanAfter">
+                        <label class="form-check-label" for="cleanAfter">Clean directories after processing</label>
+                        <div class="form-text">Delete input and output directories after results are saved</div>
                     </div>
                     
                     <button type="submit" class="btn btn-primary">Process OMR</button>
@@ -147,9 +160,24 @@
                 
                 const formData = new FormData();
                 formData.append('template_file', document.getElementById('templateFile').files[0]);
-                formData.append('image_file', document.getElementById('imageFile').files[0]);
+                
+                // Handle multiple image files
+                const imageFiles = document.getElementById('imageFile').files;
+                if (imageFiles.length === 0) {
+                    alert('Please select at least one image file');
+                    loading.style.display = 'none';
+                    return;
+                }
+                
+                // Append each image file with the same field name
+                for (let i = 0; i < imageFiles.length; i++) {
+                    formData.append('image_files', imageFiles[i]);
+                }
+                
                 formData.append('directory_name', document.getElementById('directoryName').value);
                 formData.append('include_images', document.getElementById('includeImages').checked);
+                formData.append('clean_before', document.getElementById('cleanBefore').checked);
+                formData.append('clean_after', document.getElementById('cleanAfter').checked);
                 
                 try {
                     const response = await fetch('/api/process-omr', {

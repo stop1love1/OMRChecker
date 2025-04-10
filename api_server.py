@@ -102,11 +102,12 @@ upload_parser.add_argument('template_file',
                           type=FileStorage, 
                           required=True,
                           help='JSON template file')
-upload_parser.add_argument('image_file', 
+upload_parser.add_argument('image_files', 
                           location='files',
                           type=FileStorage, 
                           required=True, 
-                          help='OMR image file (PNG, JPG, JPEG)')
+                          action='append',
+                          help='OMR image files (PNG, JPG, JPEG)')
 upload_parser.add_argument('directory_name', 
                           type=str, 
                           required=True,
@@ -116,6 +117,16 @@ upload_parser.add_argument('include_images',
                           required=False,
                           default=False,
                           help='Include base64 encoded processed images in response')
+upload_parser.add_argument('clean_before', 
+                          type=bool, 
+                          required=False,
+                          default=True,
+                          help='Clean directories before processing')
+upload_parser.add_argument('clean_after', 
+                          type=bool, 
+                          required=False,
+                          default=False,
+                          help='Clean directories after processing and saving results')
 
 # Helper function to validate directory name
 def validate_directory_name(directory_name):
@@ -207,26 +218,29 @@ class ProcessOMR(Resource):
             })
     def post(self):
         """
-        Process an OMR sheet with the provided template
+        Process multiple OMR sheets with the provided template
         
-        This endpoint accepts a template JSON file and an OMR image for processing.
-        It returns the processed results and a unique ID for retrieving the results later.
+        This endpoint accepts a template JSON file and multiple OMR images for processing.
+        It returns the processed results for each image and a unique ID for retrieving all results later.
         """
         args = upload_parser.parse_args()
         
         template_file = args['template_file']
-        image_file = args['image_file']
+        image_files = args['image_files']
         directory_name = args['directory_name']
         include_images = args['include_images']
+        clean_before = args['clean_before']
+        clean_after = args['clean_after']
         
         # Validate template file
         if not template_file.filename.endswith('.json'):
             return {'error': 'Template file must be a JSON file'}, 400
         
-        # Validate image file
-        if not any(image_file.filename.lower().endswith(ext) 
-                  for ext in ['.png', '.jpg', '.jpeg']):
-            return {'error': 'Image file must be a PNG, JPG, or JPEG file'}, 400
+        # Validate image files
+        for image_file in image_files:
+            if not any(image_file.filename.lower().endswith(ext) 
+                      for ext in ['.png', '.jpg', '.jpeg']):
+                return {'error': f'Image file {image_file.filename} must be a PNG, JPG, or JPEG file'}, 400
         
         # Validate directory name
         is_valid, error_message = validate_directory_name(directory_name)
@@ -235,10 +249,27 @@ class ProcessOMR(Resource):
         
         # Create input directory structure - use absolute paths
         input_dir = os.path.join(app.config['INPUTS_DIR_ABS'], directory_name)
+        
+        # Clean input directory if requested
+        if clean_before and os.path.exists(input_dir):
+            try:
+                logger.info(f"Cleaning input directory: {input_dir}")
+                shutil.rmtree(input_dir)
+            except Exception as e:
+                logger.warning(f"Error cleaning input directory: {str(e)}")
+        
         os.makedirs(input_dir, exist_ok=True)
         
         # Set output directory path - use absolute paths
         output_dir = os.path.join(app.config['OUTPUTS_DIR_ABS'], directory_name)
+        
+        # Clean output directory if requested
+        if clean_before and os.path.exists(output_dir):
+            try:
+                logger.info(f"Cleaning output directory: {output_dir}")
+                shutil.rmtree(output_dir)
+            except Exception as e:
+                logger.warning(f"Error cleaning output directory: {str(e)}")
         
         try:
             # Save template file - always name it template.json
@@ -246,12 +277,15 @@ class ProcessOMR(Resource):
             template_file.save(template_path)
             logger.info(f"Saved template file to {template_path}")
             
-            # Save image file with original filename
-            image_path = os.path.join(input_dir, image_file.filename)
-            image_file.save(image_path)
-            logger.info(f"Saved image file to {image_path}")
+            # Save all image files with original filenames
+            image_paths = []
+            for image_file in image_files:
+                image_path = os.path.join(input_dir, image_file.filename)
+                image_file.save(image_path)
+                image_paths.append(image_path)
+                logger.info(f"Saved image file to {image_path}")
             
-            # Process the OMR sheet
+            # Process the OMR sheets
             api_args = {
                 'input_paths': [input_dir],
                 'output_dir': app.config['OUTPUTS_DIR_ABS'],  # Set parent output dir, process_dir will create subdirectory
@@ -331,9 +365,8 @@ class ProcessOMR(Resource):
             df = df.replace([np.inf, -np.inf], 'Infinity')  # Replace infinity with string
             df = df.fillna("")  # Replace NaN with empty string
             
-            # Get only the first result (single result as requested)
+            # Get all results
             results_data = df.to_dict(orient='records')
-            first_result = results_data[0] if results_data else {}
             
             # Create a unique ID for this result set
             result_id = str(uuid.uuid4())
@@ -351,11 +384,12 @@ class ProcessOMR(Resource):
                     except Exception as copy_error:
                         logger.warning(f"Error copying file {file}: {str(copy_error)}")
             
-            # Clean NaN values to ensure valid JSON
-            clean_result = clean_nan_values(first_result)
-            
-            # Transform result format
-            transformed_result = transform_result_format(clean_result)
+            # Clean NaN values and transform all results
+            clean_results = []
+            for result in results_data:
+                clean_result = clean_nan_values(result)
+                transformed_result = transform_result_format(clean_result)
+                clean_results.append(transformed_result)
             
             response_data = {
                 'message': 'OMR processing completed successfully',
@@ -363,7 +397,7 @@ class ProcessOMR(Resource):
                 'input_dir': str(input_dir),
                 'output_dir': str(output_dir),
                 'csv_file': str(csv_file_path.name),
-                'result': transformed_result  # Single result object instead of array
+                'results': clean_results  # Array of results
             }
             
             # Include processed images if requested
@@ -379,6 +413,19 @@ class ProcessOMR(Resource):
                         logger.warning(f"Error processing image {img_file}: {str(img_error)}")
                 
                 response_data['images'] = images
+            
+            # Clean directories after processing if requested
+            if clean_after:
+                try:
+                    if os.path.exists(input_dir):
+                        logger.info(f"Cleaning input directory after processing: {input_dir}")
+                        shutil.rmtree(input_dir)
+                    
+                    if os.path.exists(output_dir):
+                        logger.info(f"Cleaning output directory after processing: {output_dir}")
+                        shutil.rmtree(output_dir)
+                except Exception as e:
+                    logger.warning(f"Error cleaning directories after processing: {str(e)}")
             
             # Return JSON response with proper encoding
             return response_data, 200
@@ -436,20 +483,20 @@ class Results(Resource):
         df = df.replace([np.inf, -np.inf], 'Infinity')  # Replace infinity with string
         df = df.fillna("")  # Replace NaN with empty string
         
-        # Get only the first result
+        # Get all results
         results_data = df.to_dict(orient='records')
-        first_result = results_data[0] if results_data else {}
         
-        # Clean NaN values to ensure valid JSON
-        clean_result = clean_nan_values(first_result)
-        
-        # Transform result format
-        transformed_result = transform_result_format(clean_result)
+        # Clean NaN values and transform all results
+        clean_results = []
+        for result in results_data:
+            clean_result = clean_nan_values(result)
+            transformed_result = transform_result_format(clean_result)
+            clean_results.append(transformed_result)
         
         return {
             'result_id': result_id,
             'csv_file': csv_files[0].name,
-            'result': transformed_result  # Single result object instead of array
+            'results': clean_results  # Return array of results
         }, 200
 
 @ns.route('/download/<string:result_id>/<path:filename>')
