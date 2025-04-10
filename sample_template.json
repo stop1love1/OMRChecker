@@ -1,0 +1,48 @@
+{
+  "pageDimensions": {
+    "width": 1654,
+    "height": 2339
+  },
+  "bubbleDimensions": {
+    "width": 24,
+    "height": 24
+  },
+  "preProcessors": [
+    {
+      "name": "GrayScale",
+      "options": {}
+    },
+    {
+      "name": "Morphology",
+      "options": {
+        "operation": "open",
+        "kernelSize": 3
+      }
+    }
+  ],
+  "fieldBlocks": {
+    "Roll": {
+      "fieldType": "QTYPE_ROLL",
+      "origin": {"x": 200, "y": 300},
+      "fieldLabels": ["R1", "R2", "R3", "R4", "R5", "R6"],
+      "directions": {"horizontal": 6, "vertical": 10},
+      "fieldArea": {"x": 40, "y": 35},
+      "options": {"A": 0, "B": 1, "C": 2, "D": 3, "E": 4, "F": 5, "G": 6, "H": 7, "I": 8, "J": 9}
+    },
+    "MCQ": {
+      "fieldType": "QTYPE_MCQ",
+      "origin": {"x": 400, "y": 700},
+      "fieldLabels": ["Q1", "Q2", "Q3", "Q4", "Q5", "Q6", "Q7", "Q8", "Q9", "Q10"],
+      "directions": {"horizontal": 5, "vertical": 2},
+      "fieldArea": {"x": 70, "y": 60},
+      "options": {"A": 0, "B": 1, "C": 2, "D": 3}
+    }
+  },
+  "customLabels": {},
+  "outputColumns": ["Roll", "Q1", "Q2", "Q3", "Q4", "Q5", "Q6", "Q7", "Q8", "Q9", "Q10"],
+  "emptyValue": "0",
+  "options": {
+    "thresholdType": "adaptive",
+    "markThreshold": 127
+  }
+} 

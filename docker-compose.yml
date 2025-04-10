@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  omrchecker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./inputs:/app/inputs
+      - ./outputs:/app/outputs
+      - ./static:/app/static
+    restart: unless-stopped
+    environment:
+      - PYTHONUNBUFFERED=1
+    container_name: omrchecker-api
+
+volumes:
+  omr_results: 
