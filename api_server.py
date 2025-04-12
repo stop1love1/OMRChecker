@@ -1,7 +1,5 @@
 """
 OMRChecker API Server
-
-This module provides a REST API with Swagger integration for the OMRChecker.
 """
 
 import os
@@ -143,10 +141,7 @@ get_params_parser.add_argument('clean_after',
                           help='Clean directories after processing and saving results')
 
 def validate_directory_name(directory_name):
-    """
-    Validates that the directory name does not contain path separators or invalid characters
-    Returns (is_valid, error_message)
-    """
+    """Validates that directory name doesn't contain path separators or invalid characters"""
     if '/' in directory_name or '\\' in directory_name:
         return False, "Directory name cannot contain path separators ('/' or '\\')"
     
@@ -156,7 +151,7 @@ def validate_directory_name(directory_name):
     return True, None
 
 def clean_nan_values(obj):
-    """Convert NaN, Infinity, -Infinity to null or strings in JSON objects"""
+    """Replace NaN, Infinity with empty strings or string representations"""
     if isinstance(obj, dict):
         return {k: clean_nan_values(v) for k, v in obj.items()}
     elif isinstance(obj, list):
@@ -189,23 +184,16 @@ def send_static(path):
 
 @app.route('/images/<filename>')
 def serve_public_image(filename):
-    """Serve images from the public_images directory"""
     return send_from_directory(app.config['PUBLIC_IMAGES_DIR_ABS'], filename)
 
-# Helper function to transform result data
 def transform_result_format(result_data):
-    """
-    Transform flat result object with q1, q2... keys into a structured format
-    with metadata and an answers array containing key-value pairs
-    """
+    """Transform flat result keys (q1, q2, etc.) into structured format with answers array"""
     if not result_data or not isinstance(result_data, dict):
         return result_data
     
-    # Extract metadata fields (non-question fields)
     metadata = {k: v for k, v in result_data.items() 
                if not k.startswith('q') or not k[1:].replace('-', '').isdigit()}
     
-    # Extract question fields and create answers array
     answers = []
     for key, value in result_data.items():
         if key.startswith('q') and key[1:].replace('-', '').isdigit():
@@ -214,37 +202,28 @@ def transform_result_format(result_data):
                 "value": value
             })
     
-    # Create transformed result
     transformed_result = metadata.copy()
     transformed_result['answers'] = answers
     
     return transformed_result
 
-# Helper function to save images to public directory with unique names
 def save_to_public_images(image_path, prefix):
-    """
-    Save an image to the public_images directory with a unique name
-    Returns the filename of the saved image
-    """
+    """Save image to public directory with unique filename and return its URL"""
     try:
         timestamp = int(time.time())
         unique_id = str(uuid.uuid4())[:8]
         file_ext = os.path.splitext(image_path)[1].lower()
         
-        # Create a unique filename
         filename = f"{prefix}_{timestamp}_{unique_id}{file_ext}"
         public_path = os.path.join(app.config['PUBLIC_IMAGES_DIR_ABS'], filename)
         
-        # Copy the file
         shutil.copy2(image_path, public_path)
         
-        # Return the public URL
         return f"{app.config['API_HOST']}/images/{filename}"
     except Exception as e:
         app.logger.warning(f"Failed to save public image: {e}")
         return None
 
-# Document the API response structure for Swagger
 public_image_model = api.model('PublicImage', {
     'url': fields.String(description='URL để truy cập ảnh từ bên ngoài')
 })
@@ -271,13 +250,7 @@ class ProcessOMR(Resource):
                 500: 'Processing Error'
             })
     def post(self):
-        """
-        Process multiple OMR sheets with the provided template
-        
-        This endpoint accepts a template JSON file and multiple OMR images for processing.
-        It can also process PDF documents, which will be split into individual pages/images.
-        It returns the processed results for each image and a unique ID for retrieving all results later.
-        """
+        """Process multiple OMR sheets with the provided template"""
         try:
             args = upload_parser.parse_args()
             
@@ -295,14 +268,11 @@ class ProcessOMR(Resource):
             logger.info(f"Processing POST request with parameters: directory_name={directory_name}, "
                        f"clean_before={clean_before} (type: {type(clean_before)}), clean_after={clean_after} (type: {type(clean_after)})")
             
-            # Validate directory name
             if not validate_directory_name(directory_name):
                 return {"error": "Invalid directory name. Use alphanumeric characters, underscore, and hyphen only."}, 400
             
-            # Create input directory structure - use absolute paths
             input_dir = os.path.join(app.config['INPUTS_DIR_ABS'], directory_name)
             
-            # Clean input directory if requested
             logger.info(f"About to check clean_before={clean_before} for input dir: {input_dir}")
             if clean_before and os.path.exists(input_dir):
                 try:
@@ -315,10 +285,8 @@ class ProcessOMR(Resource):
             
             os.makedirs(input_dir, exist_ok=True)
             
-            # Set output directory path - use absolute paths
             output_dir = os.path.join(app.config['OUTPUTS_DIR_ABS'], directory_name)
             
-            # Clean output directory if requested
             logger.info(f"About to check clean_before={clean_before} for output dir: {output_dir}")
             if clean_before and os.path.exists(output_dir):
                 try:
@@ -330,7 +298,6 @@ class ProcessOMR(Resource):
                 logger.info(f"Skipping output directory cleaning (clean_before={clean_before})")
             
             try:
-                # Save template file - always name it template.json
                 template_file = args['template_file']
                 if not template_file.filename.endswith('.json'):
                     return {'error': 'Template file must be a JSON file'}, 400
@@ -339,19 +306,17 @@ class ProcessOMR(Resource):
                 template_file.save(template_path)
                 logger.info(f"Saved template file to {template_path}")
                 
-                # Save marker file if provided
                 marker_file = args['marker_file']
                 if marker_file and not any(marker_file.filename.lower().endswith(ext) 
                               for ext in ['.png', '.jpg', '.jpeg']):
                     return {'error': f'Marker file {marker_file.filename} must be a PNG, JPG, or JPEG file'}, 400
                 
                 if marker_file:
-                    # Always save marker file as marker.png regardless of original name
+                    # Save marker file with fixed name regardless of original filename
                     marker_path = os.path.join(input_dir, 'marker.png')
                     marker_file.save(marker_path)
                     logger.info(f"Saved marker file to {marker_path}")
                     
-                    # Verify the file was saved correctly
                     if os.path.exists(marker_path):
                         logger.info(f"Marker file verified at {marker_path}")
                     else:
@@ -359,36 +324,28 @@ class ProcessOMR(Resource):
                 else:
                     logger.warning("No marker file provided in the request")
                 
-                # Save and process all image files
                 image_paths = []
                 
-                # Process each uploaded file
                 for image_file in args['image_files']:
-                    # Check if it's a PDF file
                     if image_file.filename.lower().endswith('.pdf'):
                         logger.info(f"Processing PDF file: {image_file.filename}")
                         
-                        # Save the PDF temporarily to process it
                         pdf_path = os.path.join(input_dir, image_file.filename)
                         image_file.save(pdf_path)
                         
                         try:
-                            # First try with PyMuPDF (usually more reliable in Docker)
                             pdf_processed = False
+                            # Try PyMuPDF first
                             try:
                                 logger.info("Using PyMuPDF library to process PDF")
                                 
-                                # Open the PDF file
                                 pdf_document = fitz.open(pdf_path)
                                 
-                                # Check if we have pages
                                 if pdf_document.page_count == 0:
                                     logger.warning(f"PDF file has no pages: {image_file.filename}")
                                     
-                                # Iterate through each page
                                 for i in range(pdf_document.page_count):
                                     page = pdf_document[i]
-                                    # Convert page to an image (300 DPI)
                                     pix = page.get_pixmap(matrix=fitz.Matrix(300/72, 300/72))
                                     img_filename = f"{os.path.splitext(image_file.filename)[0]}_page_{i+1}.jpg"
                                     img_path = os.path.join(input_dir, img_filename)
@@ -405,21 +362,19 @@ class ProcessOMR(Resource):
                             except Exception as e:
                                 logger.warning(f"Error using PyMuPDF: {str(e)}. Will try pdf2image...")
                                 
-                            # If PyMuPDF didn't work, try pdf2image
+                            # Fall back to pdf2image if PyMuPDF failed
                             if not pdf_processed:
                                 try:
                                     from pdf2image import convert_from_path
                                     logger.info("Using pdf2image library to process PDF")
                                     
-                                    # Try with explicit path to poppler on Linux
                                     try:
-                                        # First try with default poppler path
                                         logger.info("Converting PDF with default poppler path")
                                         pdf_images = convert_from_path(pdf_path)
                                     except Exception as poppler_err:
                                         logger.warning(f"Default poppler path failed: {str(poppler_err)}. Trying alternate paths...")
                                         
-                                        # Try with specific poppler paths
+                                        # Try different poppler paths for different systems
                                         poppler_paths = [
                                             '/usr/bin',
                                             '/usr/local/bin',
@@ -435,10 +390,8 @@ class ProcessOMR(Resource):
                                             except Exception as path_err:
                                                 logger.warning(f"Failed with poppler path {poppler_path}: {str(path_err)}")
                                         else:
-                                            # If we've tried all paths and none worked
                                             raise Exception("All poppler paths failed. Make sure poppler-utils is correctly installed.")
                                     
-                                    # Save each page as an image
                                     for i, image in enumerate(pdf_images):
                                         img_filename = f"{os.path.splitext(image_file.filename)[0]}_page_{i+1}.jpg"
                                         img_path = os.path.join(input_dir, img_filename)
@@ -463,7 +416,6 @@ class ProcessOMR(Resource):
                             logger.error(f"Error processing PDF file {image_file.filename}: {str(pdf_error)}")
                             return {'error': f'Error processing PDF file {image_file.filename}: {str(pdf_error)}. Check if poppler-utils is installed correctly.'}, 500
                         
-                        # Optionally remove the original PDF file to save space
                         try:
                             os.remove(pdf_path)
                             logger.info(f"Removed original PDF file: {pdf_path}")
@@ -471,29 +423,26 @@ class ProcessOMR(Resource):
                             logger.warning(f"Could not remove PDF file {pdf_path}: {str(rm_error)}")
                     
                     else:
-                        # Regular image file - save as is
                         image_path = os.path.join(input_dir, image_file.filename)
                         image_file.save(image_path)
                         image_paths.append(image_path)
                         logger.info(f"Saved image file to {image_path}")
                 
-                # Process the OMR sheets
+                # Setup arguments for OMR processing
                 api_args = {
                     'input_paths': [input_dir],
-                    'output_dir': app.config['OUTPUTS_DIR_ABS'],  # Set parent output dir, process_dir will create subdirectory
+                    'output_dir': app.config['OUTPUTS_DIR_ABS'],
                     'autoAlign': False,
                     'setLayout': False,
                     'debug': True,
                 }
                 
-                # Load template
                 tuning_config = CONFIG_DEFAULTS
                 template = Template(Path(template_path), tuning_config)
                 
-                # Process the directory
                 logger.info(f"Processing directory: {input_dir}")
                 
-                # For process_dir, use Path objects consistently
+                # Use Path objects consistently for process_dir
                 root_dir = Path(app.config['INPUTS_DIR_ABS'])
                 curr_dir = Path(input_dir)
                 
@@ -505,31 +454,30 @@ class ProcessOMR(Resource):
                     tuning_config=tuning_config
                 )
                 
-                # Look for Results_11AM.csv file
                 output_dir_path = Path(output_dir)
                 
-                # Log all available CSV files for debugging
+                # Find CSV result file with fallback options
                 all_csv_files = list(output_dir_path.glob('**/*.csv'))
                 logger.info(f"All CSV files found in output directory: {[str(f) for f in all_csv_files]}")
                 
-                # First check for CSV files in CheckedOMRs directory (where actual results are)
+                # Look in CheckedOMRs directory first
                 results_file = list(output_dir_path.glob('**/CheckedOMRs/*.csv'))
                 if results_file:
                     logger.info(f"Found CSV in CheckedOMRs: {results_file[0]}")
                 
-                # Then check for Results_XXX.csv in the Results folder
+                # Then look in Results folder
                 if not results_file:
                     results_file = list(output_dir_path.glob('**/Results/*.csv'))
                     if results_file:
                         logger.info(f"Found CSV in Results folder: {results_file[0]}")
                 
-                # If Results/*.csv not found, look for Results_*.csv anywhere
+                # Try Results_*.csv anywhere
                 if not results_file:
                     results_file = list(output_dir_path.glob('**/Results_*.csv'))
                     if results_file:
                         logger.info(f"Found Results_*.csv: {results_file[0]}")
                 
-                # Last resort: any CSV file (excluding ErrorFiles.csv if possible)
+                # Last resort: any CSV except ErrorFiles.csv
                 if not results_file:
                     non_error_csv = [f for f in all_csv_files if 'ErrorFiles.csv' not in str(f)]
                     if non_error_csv:
@@ -543,24 +491,19 @@ class ProcessOMR(Resource):
                 if not results_file:
                     return {'error': 'Processing failed - no results generated'}, 500
                 
-                # Read the results file
                 import pandas as pd
                 csv_file_path = results_file[0]
                 logger.info(f"Reading CSV results from: {csv_file_path}")
                 
-                # Read CSV and explicitly handle NaN values
                 df = pd.read_csv(csv_file_path)
-                logger.info(f"CSV contents: {df.head().to_dict()}")
-                logger.info(f"CSV shape: {df.shape}")
+
+                # Replace NaN and infinite values
+                df = df.replace([np.inf, -np.inf], 'Infinity')
+                df = df.fillna("")
                 
-                # Replace NaN and infinite values with empty strings
-                df = df.replace([np.inf, -np.inf], 'Infinity')  # Replace infinity with string
-                df = df.fillna("")  # Replace NaN with empty string
-                
-                # Get all results
                 results_data = df.to_dict(orient='records')
                 
-                # Create a unique ID for this result set
+                # Create unique ID for this result set
                 result_id = str(uuid.uuid4())
                 result_dir = Path(app.config['PROCESSED_DIR']) / result_id
                 os.makedirs(result_dir, exist_ok=True)
@@ -576,32 +519,29 @@ class ProcessOMR(Resource):
                         except Exception as copy_error:
                             logger.warning(f"Error copying file {file}: {str(copy_error)}")
                 
-                # Clean NaN values and transform all results
+                # Process results and save public images
                 clean_results = []
                 for result in results_data:
                     clean_result = clean_nan_values(result)
                     transformed_result = transform_result_format(clean_result)
                     
-                    # Find input image and output image paths
+                    # Find input and output image paths
                     input_image_path = None
                     output_image_path = None
                     
-                    # Get the original input image path
                     if 'input_path' in clean_result:
                         input_image_path = clean_result['input_path']
                     elif 'file_id' in clean_result:
-                        # Try to find the file by name
                         file_id = clean_result['file_id']
                         for img_path in image_paths:
                             if os.path.basename(img_path) == file_id:
                                 input_image_path = img_path
                                 break
                     
-                    # Get the output image path (checked OMR)
                     if 'output_path' in clean_result:
                         output_image_path = clean_result['output_path']
                     
-                    # Save both input and output images to public directory if they exist
+                    # Save images to public directory and add URLs to result
                     public_input_image = None
                     public_output_image = None
                     
@@ -623,10 +563,10 @@ class ProcessOMR(Resource):
                     'input_dir': str(input_dir),
                     'output_dir': str(output_dir),
                     'csv_file': str(csv_file_path.name),
-                    'results': clean_results  # Array of results with public image URLs
+                    'results': clean_results
                 }
                 
-                # Clean directories after processing if requested
+                # Clean directories if requested
                 if clean_after:
                     try:
                         if os.path.exists(input_dir):
@@ -639,7 +579,6 @@ class ProcessOMR(Resource):
                     except Exception as e:
                         logger.warning(f"Error cleaning directories after processing: {str(e)}")
                 
-                # Return JSON response with proper encoding
                 return response_data, 200
                 
             except Exception as e:
@@ -657,16 +596,12 @@ class ProcessOMR(Resource):
                 500: 'Processing Error'
             })
     def get(self):
-        """
-        GET endpoint for OMR processing status
-        
-        This endpoint is mainly for handling query parameters and returning folder status.
-        Note: This endpoint doesn't process OMR sheets - use POST method for that.
-        """
+        """Return status information for a directory without processing files (status check only)"""
         args = get_params_parser.parse_args()
         
         directory_name = args['directory_name']
         
+        # Convert string values to boolean if needed
         clean_before = args['clean_before']
         if isinstance(clean_before, str):
             clean_before = clean_before.lower() != 'false'
@@ -727,29 +662,22 @@ class Results(Resource):
                 404: 'Result not found'
             })
     def get(self, result_id):
-        """
-        Get results for a specific processed OMR
-        
-        Retrieves the stored results using a previously generated result ID.
-        """
+        """Get results for a specific processed OMR"""
         result_dir = Path(app.config['PROCESSED_DIR']) / result_id
         
         if not result_dir.exists():
             return {'error': 'Result not found'}, 404
         
-        # First check for CSV files in CheckedOMRs directory
+        # Find CSV result file with multiple fallback options
         csv_files = list(result_dir.glob('**/CheckedOMRs/*.csv'))
         
         if not csv_files:
-            # Then check for Results_XXX.csv in the Results folder
             csv_files = list(result_dir.glob('**/Results/*.csv')) 
         
         if not csv_files:
-            # If Results/*.csv not found, look for Results_*.csv anywhere
             csv_files = list(result_dir.glob('**/Results_*.csv'))
         
         if not csv_files:
-            # If not found, look for any CSV file (excluding ErrorFiles.csv if possible)
             all_csv = list(result_dir.glob('**/*.csv'))
             non_error_csv = [f for f in all_csv if 'ErrorFiles.csv' not in str(f)]
             if non_error_csv:
@@ -761,16 +689,12 @@ class Results(Resource):
             return {'error': 'No results found'}, 404
         
         import pandas as pd
-        # Read CSV and explicitly handle NaN values
         df = pd.read_csv(csv_files[0])
-        # Replace NaN and infinite values with empty strings
-        df = df.replace([np.inf, -np.inf], 'Infinity')  # Replace infinity with string
-        df = df.fillna("")  # Replace NaN with empty string
+        df = df.replace([np.inf, -np.inf], 'Infinity')
+        df = df.fillna("")
         
-        # Get all results
         results_data = df.to_dict(orient='records')
         
-        # Clean NaN values and transform all results
         clean_results = []
         for result in results_data:
             clean_result = clean_nan_values(result)
@@ -780,7 +704,7 @@ class Results(Resource):
         return {
             'result_id': result_id,
             'csv_file': csv_files[0].name,
-            'results': clean_results  # Return array of results
+            'results': clean_results
         }, 200
 
 @ns.route('/download/<string:result_id>/<path:filename>')
@@ -793,12 +717,8 @@ class Download(Resource):
                 404: 'File not found'
             })
     def get(self, result_id, filename):
-        """
-        Download a file from the results
-        
-        Downloads a specific file (CSV, image, etc.) from a previously processed result set.
-        """
-        # Validate filename doesn't contain path traversal
+        """Download a file from the results"""
+        # Security check for path traversal
         if '..' in filename or filename.startswith('/'):
             return {'error': 'Invalid filename'}, 400
             
@@ -807,26 +727,23 @@ class Download(Resource):
         if not result_dir.exists():
             return {'error': 'Result not found'}, 404
         
-        # Handle special case for 'Results_11AM.csv'
+        # Special handling for Results_11AM.csv
         if filename.lower() == 'results_11am.csv' or filename.lower() == 'results.csv':
-            # Try to find Results_11AM.csv
             results_file = list(result_dir.glob('**/Results_11AM.csv'))
             if results_file:
                 file_path = results_file[0]
             else:
-                # Fall back to any CSV file
                 results_file = list(result_dir.glob('**/*.csv'))
                 if not results_file:
                     return {'error': 'No CSV results found'}, 404
                 file_path = results_file[0]
         else:
-            # Regular file path
             file_path = result_dir / filename
             
         if not file_path.exists() or not file_path.is_file():
             return {'error': 'File not found'}, 404
         
-        # Validate the file is within the result_dir (no path traversal)
+        # Additional security check for path traversal
         try:
             if not str(file_path.resolve()).startswith(str(result_dir.resolve())):
                 return {'error': 'Invalid file path'}, 403
@@ -846,18 +763,12 @@ class Health(Resource):
                 200: 'API is healthy'
             })
     def get(self):
-        """
-        Health check endpoint
-        
-        Simple endpoint to check if the API is running correctly.
-        """
+        """Health check endpoint"""
         return {'status': 'healthy'}, 200
 
-# Generate Swagger JSON
 @app.route('/api/swagger.json')
 def swagger_json():
     schema_json = api.__schema__
-    # Need to manually serialize to ensure NaN handling
     return app.response_class(
         json.dumps(schema_json, cls=CustomJSONEncoder),
         mimetype='application/json'
