@@ -448,7 +448,7 @@ Tất cả API endpoints đều có tiền tố `/api`.
 **Parameters:**
 - `template_file` (required): Tệp JSON định nghĩa bố cục OMR
 - `marker_file` (optional): Tệp ảnh marker dùng để đánh dấu vị trí, lưu cùng thư mục với template
-- `image_files` (required): Các tệp ảnh OMR (định dạng PNG, JPG, JPEG), có thể chọn nhiều file
+- `image_files` (required): Các tệp ảnh OMR (định dạng PNG, JPG, JPEG) hoặc PDF, có thể chọn nhiều file
 - `directory_name` (required): Tên thư mục sẽ được tạo trong thư mục inputs (không được chứa dấu / hoặc \)
 - `include_images` (optional, default: false): Có kèm theo hình ảnh đã xử lý dưới dạng base64 hay không
 - `clean_before` (optional, default: true): Xóa thư mục inputs và outputs trước khi xử lý nếu đã tồn tại
@@ -470,17 +470,27 @@ curl -X POST "http://localhost:5000/api/process-omr" \
 **Phản hồi:**
 ```json
 {
+  "message": "OMR processing completed successfully",
+  "result_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+  "input_dir": "inputs/my_omr_test",
+  "output_dir": "outputs/my_omr_test",
+  "csv_file": "Results_05AM.csv",
   "results": [
     {
       "file_id": "image1.jpg",
       "score": 0,
+      "public_input_image": "http://localhost:5000/public_images/input_1695432145_a7bc1234.jpg",
+      "public_output_image": "http://localhost:5000/public_images/output_1695432145_a7bc1234.jpg",
       "answers": [
         {"key": "q1", "value": "A"},
-        {"key": "q2", "value": "B"}
+        {"key": "q2", "value": "B"},
+        {"key": "q3", "value": "C"}
       ]
     },
     {
       "file_id": "image2.jpg",
+      "public_input_image": "http://localhost:5000/public_images/input_1695432146_b8de5678.jpg",
+      "public_output_image": "http://localhost:5000/public_images/output_1695432146_b8de5678.jpg",
       "score": 0,
       "answers": [
         {"key": "q1", "value": "C"},
@@ -724,16 +734,128 @@ async function processOMR() {
    }
    ```
 
-4. Bạn có thể chọn xóa thư mục đầu vào và đầu ra trước khi xử lý (để tránh trùng lặp) và sau khi xử lý (để tiết kiệm không gian) bằng cách sử dụng tham số `clean_before` và `clean_after`.
+4. API hỗ trợ xử lý file PDF đầu vào, mỗi trang của file PDF sẽ được chuyển đổi thành một ảnh riêng biệt và được xử lý như các file ảnh OMR thông thường. Điều này rất hữu ích khi bạn có nhiều phiếu trả lời đã được scan thành một file PDF.
 
-5. Các tệp đã tải lên sẽ vẫn còn trong thư mục `inputs` nếu bạn không sử dụng tham số `clean_after=true`. Bạn có thể chạy lại quá trình xử lý trực tiếp với OMRChecker bằng cách sử dụng lệnh:
+5. Bạn có thể chọn xóa thư mục đầu vào và đầu ra trước khi xử lý (để tránh trùng lặp) và sau khi xử lý (để tiết kiệm không gian) bằng cách sử dụng tham số `clean_before` và `clean_after`.
+
+6. Các tệp đã tải lên sẽ vẫn còn trong thư mục `inputs` nếu bạn không sử dụng tham số `clean_after=true`. Bạn có thể chạy lại quá trình xử lý trực tiếp với OMRChecker bằng cách sử dụng lệnh:
    ```
    python main.py -i inputs/{directory_name}
    ```
 
-6. Đối với Docker, kết quả xử lý sẽ mất đi khi container bị xóa nếu không mount volumes. Khi cần lưu trữ lâu dài, hãy sử dụng:
+7. Đối với Docker, kết quả xử lý sẽ mất đi khi container bị xóa nếu không mount volumes. Khi cần lưu trữ lâu dài, hãy sử dụng:
    ```
    docker run -d --name omrchecker-api -p 5000:5000 -v ./inputs:/app/inputs -v ./outputs:/app/outputs -v ./static:/app/static omrchecker-api
    ```
 
-7. Đối với môi trường sản xuất, nên bổ sung xác thực và giới hạn tốc độ yêu cầu.
+8. Đối với môi trường sản xuất, nên bổ sung xác thực và giới hạn tốc độ yêu cầu.
+
+## Truy Cập Ảnh Public
+
+API tự động lưu bản sao của tất cả ảnh đầu vào và đầu ra trong thư mục `public_images` với tên file duy nhất. Những ảnh này có thể được truy cập trực tiếp thông qua URL mà không cần xác thực.
+
+URLs cho ảnh public được trả về trong response của API dưới dạng:
+- `public_input_image`: URL của ảnh đầu vào gốc
+- `public_output_image`: URL của ảnh đã được xử lý (có các đánh dấu)
+
+Ví dụ URL:
+```
+http://localhost:5000/public_images/input_1695432145_a7bc1234.jpg
+http://localhost:5000/public_images/output_1695432145_a7bc1234.jpg
+```
+
+Bạn có thể thiết lập host URL trong Docker bằng cách sử dụng biến môi trường `API_HOST`:
+```bash
+docker run -d --name omrchecker-api -p 5000:5000 -e API_HOST=https://your-domain.com omrchecker-api
+```
+
+Nếu không được thiết lập, URL mặc định sẽ là `http://localhost:5000`.
+
+## API Usage
+
+The OMRChecker project provides a RESTful API that allows you to process OMR sheets programmatically. This section provides details on how to use the API endpoints and access public images.
+
+### Starting the API Server
+
+To start the API server:
+
+- **Windows**: Run `start_api.bat` script
+- **Linux/macOS**: Run `./start_api.sh` script
+
+The API server will start on port 5000 by default: http://localhost:5000
+
+### API Endpoints
+
+#### Process OMR Sheets
+
+- **Endpoint**: `/api/process-omr`
+- **Method**: POST
+- **Content-Type**: multipart/form-data
+- **Parameters**:
+  - `template_file` (required): JSON template file for OMR processing
+  - `marker_file` (optional): Marker image file (JPG/PNG)
+  - `image_files` (required): One or more image files to process (JPG/PNG/PDF)
+  - `directory_name` (required): Name for the input/output directory
+  - `include_images` (optional): Whether to include base64 encoded images in response (default: false)
+  - `clean_before` (optional): Whether to clean existing directories before processing (default: true)
+  - `clean_after` (optional): Whether to clean directories after processing (default: false)
+
+- **Example Request**:
+  ```bash
+  curl -X POST "http://localhost:5000/api/process-omr" \
+    -F "template_file=@template.json" \
+    -F "marker_file=@marker.jpg" \
+    -F "image_files=@sample1.jpg" \
+    -F "image_files=@sample2.jpg" \
+    -F "directory_name=test-batch" \
+    -F "include_images=false"
+  ```
+
+- **Example Response**:
+  ```json
+  {
+    "message": "OMR processing completed successfully",
+    "result_id": "f7e6d5c4-b3a2-41a0-9a8b-8c7d6e5f4e3d",
+    "input_dir": "/path/to/workspace/inputs/test-batch",
+    "output_dir": "/path/to/workspace/outputs/test-batch",
+    "csv_file": "Results_11AM.csv",
+    "results": [
+      {
+        "file_id": "sample1.jpg",
+        "score": 85,
+        "answers": [
+          {"key": "q1", "value": "A"},
+          {"key": "q2", "value": "C"},
+          {"key": "q3", "value": "B"}
+        ],
+        "public_input_image": "http://localhost:5000/public_images/input_1628347294_a1b2c3d4.jpg",
+        "public_output_image": "http://localhost:5000/public_images/output_1628347294_a1b2c3d4.jpg"
+      },
+      {
+        "file_id": "sample2.jpg",
+        "score": 92,
+        "answers": [
+          {"key": "q1", "value": "B"},
+          {"key": "q2", "value": "A"},
+          {"key": "q3", "value": "D"}
+        ],
+        "public_input_image": "http://localhost:5000/public_images/input_1628347295_e5f6g7h8.jpg",
+        "public_output_image": "http://localhost:5000/public_images/output_1628347295_e5f6g7h8.jpg"
+      }
+    ]
+  }
+  ```
+
+### Accessing Public Images
+
+The API saves copies of all input and output images in a `public_images` directory, making them accessible via URL without authentication. These URLs are included in the API response for each processed image.
+
+- **Original Images**: `http://localhost:5000/public_images/input_[timestamp]_[uuid].jpg`
+- **Processed Images**: `http://localhost:5000/public_images/output_[timestamp]_[uuid].jpg`
+
+When running in Docker, you can set the host URL using the `API_HOST` environment variable:
+```
+docker run -e API_HOST=https://your-domain.com -p 5000:5000 omrchecker-api
+```
+
+**Note**: For production environments, it's recommended to implement authentication and rate limiting for the API endpoints and public image access.
