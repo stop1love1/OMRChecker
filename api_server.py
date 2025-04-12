@@ -11,8 +11,10 @@ import math
 import numpy as np
 import re
 import time
+import datetime
 from pathlib import Path
 from werkzeug.datastructures import FileStorage
+from apscheduler.schedulers.background import BackgroundScheduler
 
 from flask import Flask, send_from_directory, send_file, Blueprint
 from flask_restx import Api, Resource, fields, reqparse, inputs
@@ -225,19 +227,18 @@ def save_to_public_images(image_path, prefix):
         return None
 
 public_image_model = api.model('PublicImage', {
-    'url': fields.String(description='URL để truy cập ảnh từ bên ngoài')
+    'url': fields.String(description='URL to access image from outside')
 })
 
 result_model = api.model('Result', {
-    'file_id': fields.String(description='Tên file ảnh gốc'),
-    'score': fields.Float(description='Điểm số'),
-    'input_image_url': fields.String(description='URL của ảnh đầu vào'),
-    'output_image_url': fields.String(description='URL của ảnh đã được xử lý'),
+    'file_id': fields.String(description='Original image filename'),
+    'score': fields.Float(description='Score'),
+    'input_image_url': fields.String(description='URL of input image'),
+    'output_image_url': fields.String(description='URL of processed image'),
     'answers': fields.List(fields.Nested(api.model('Answer', {
-        'key': fields.String(description='Mã câu hỏi'),
-        'value': fields.String(description='Giá trị trả lời')
+        'key': fields.String(description='Question code'),
+        'value': fields.String(description='Answer value')
     }))),
-    
 })
 
 @ns.route('/process-omr')
@@ -773,6 +774,74 @@ def swagger_json():
         json.dumps(schema_json, cls=CustomJSONEncoder),
         mimetype='application/json'
     )
+
+# Function to clean images directory
+def clean_folder_contents(folder_path, folder_name):
+    """Delete all contents inside the folder without deleting the folder itself"""
+    try:
+        logger.info(f"Cleaning {folder_name} directory at {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        items_count = 0
+        
+        for item in os.listdir(folder_path):
+            item_path = os.path.join(folder_path, item)
+            if os.path.isfile(item_path):
+                try:
+                    os.remove(item_path)
+                    items_count += 1
+                except Exception as e:
+                    logger.error(f"Error deleting file {item_path}: {str(e)}")
+            elif os.path.isdir(item_path):
+                try:
+                    shutil.rmtree(item_path)
+                    items_count += 1
+                except Exception as e:
+                    logger.error(f"Error removing directory {item_path}: {str(e)}")
+                    
+        logger.info(f"Cleaned {items_count} items from {folder_name} directory")
+        return items_count
+    except Exception as e:
+        logger.error(f"Error during scheduled cleaning of {folder_name} directory: {str(e)}")
+        return 0
+
+def clean_all_folders():
+    """Delete contents of all directories: inputs, outputs, images"""
+    total_items = 0
+    
+    total_items += clean_folder_contents(app.config['INPUTS_DIR_ABS'], "inputs")
+    
+    total_items += clean_folder_contents(app.config['OUTPUTS_DIR_ABS'], "outputs")
+    
+    total_items += clean_folder_contents(app.config['PUBLIC_IMAGES_DIR_ABS'], "images")
+    
+    logger.info(f"Cleaned a total of {total_items} items from all directories")
+    return total_items
+
+scheduler = BackgroundScheduler()
+scheduler.add_job(clean_all_folders, 'cron', hour=0, minute=0)
+scheduler.start()
+
+import atexit
+atexit.register(lambda: scheduler.shutdown())
+
+@ns.route('/clean-folders')
+class CleanFolders(Resource):
+    @ns.doc('clean_folders',
+            responses={
+                200: 'Cleaned successfully',
+                500: 'Cleaning error'
+            })
+    def post(self):
+        """Delete contents of all directories: inputs, outputs, images"""
+        try:
+            total_items = clean_all_folders()
+            return {
+                'status': 'success',
+                'message': f'Deleted {total_items} items from all directories'
+            }, 200
+        except Exception as e:
+            logger.error(f"Error during manual cleaning: {str(e)}")
+            return {'error': f'Error cleaning directories: {str(e)}'}, 500
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000) 
