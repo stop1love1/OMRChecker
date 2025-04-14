@@ -155,6 +155,11 @@ def validate_directory_name(directory_name):
 def clean_nan_values(obj):
     """Replace NaN, Infinity with empty strings or string representations"""
     if isinstance(obj, dict):
+        # Ensure studentId and code are always strings
+        if 'studentId' in obj and obj['studentId'] is not None:
+            obj['studentId'] = str(obj['studentId'])
+        if 'code' in obj and obj['code'] is not None:
+            obj['code'] = str(obj['code'])
         return {k: clean_nan_values(v) for k, v in obj.items()}
     elif isinstance(obj, list):
         return [clean_nan_values(item) for item in obj]
@@ -223,7 +228,7 @@ def save_to_public_images(image_path, prefix):
         
         return f"{app.config['API_HOST']}/images/{filename}"
     except Exception as e:
-        app.logger.warning(f"Failed to save public image: {e}")
+        logger.error(f"Failed to save public image: {e}")
         return None
 
 public_image_model = api.model('PublicImage', {
@@ -233,6 +238,8 @@ public_image_model = api.model('PublicImage', {
 result_model = api.model('Result', {
     'file_id': fields.String(description='Original image filename'),
     'score': fields.Float(description='Score'),
+    'studentId': fields.String(description='Student ID'),
+    'code': fields.String(description='Code or identifier'),
     'input_image_url': fields.String(description='URL of input image'),
     'output_image_url': fields.String(description='URL of processed image'),
     'answers': fields.List(fields.Nested(api.model('Answer', {
@@ -266,37 +273,28 @@ class ProcessOMR(Resource):
             if isinstance(clean_after, str):
                 clean_after = clean_after.lower() != 'false'
             
-            logger.info(f"Processing POST request with parameters: directory_name={directory_name}, "
-                       f"clean_before={clean_before} (type: {type(clean_before)}), clean_after={clean_after} (type: {type(clean_after)})")
+            logger.info(f"Processing OMR for directory: {directory_name}")
             
             if not validate_directory_name(directory_name):
                 return {"error": "Invalid directory name. Use alphanumeric characters, underscore, and hyphen only."}, 400
             
             input_dir = os.path.join(app.config['INPUTS_DIR_ABS'], directory_name)
             
-            logger.info(f"About to check clean_before={clean_before} for input dir: {input_dir}")
             if clean_before and os.path.exists(input_dir):
                 try:
-                    logger.info(f"Cleaning input directory: {input_dir} (clean_before=True)")
                     shutil.rmtree(input_dir)
                 except Exception as e:
                     logger.warning(f"Error cleaning input directory: {str(e)}")
-            else:
-                logger.info(f"Skipping input directory cleaning (clean_before={clean_before})")
             
             os.makedirs(input_dir, exist_ok=True)
             
             output_dir = os.path.join(app.config['OUTPUTS_DIR_ABS'], directory_name)
             
-            logger.info(f"About to check clean_before={clean_before} for output dir: {output_dir}")
             if clean_before and os.path.exists(output_dir):
                 try:
-                    logger.info(f"Cleaning output directory: {output_dir} (clean_before=True)")
                     shutil.rmtree(output_dir)
                 except Exception as e:
                     logger.warning(f"Error cleaning output directory: {str(e)}")
-            else:
-                logger.info(f"Skipping output directory cleaning (clean_before={clean_before})")
             
             try:
                 template_file = args['template_file']
@@ -305,7 +303,6 @@ class ProcessOMR(Resource):
                 
                 template_path = os.path.join(input_dir, 'template.json')
                 template_file.save(template_path)
-                logger.info(f"Saved template file to {template_path}")
                 
                 marker_file = args['marker_file']
                 if marker_file and not any(marker_file.filename.lower().endswith(ext) 
@@ -316,14 +313,9 @@ class ProcessOMR(Resource):
                     # Save marker file with fixed name regardless of original filename
                     marker_path = os.path.join(input_dir, 'marker.png')
                     marker_file.save(marker_path)
-                    logger.info(f"Saved marker file to {marker_path}")
                     
-                    if os.path.exists(marker_path):
-                        logger.info(f"Marker file verified at {marker_path}")
-                    else:
+                    if not os.path.exists(marker_path):
                         logger.error(f"Failed to save marker file at {marker_path}")
-                else:
-                    logger.warning("No marker file provided in the request")
                 
                 image_paths = []
                 
@@ -338,8 +330,6 @@ class ProcessOMR(Resource):
                             pdf_processed = False
                             # Try PyMuPDF first
                             try:
-                                logger.info("Using PyMuPDF library to process PDF")
-                                
                                 pdf_document = fitz.open(pdf_path)
                                 
                                 if pdf_document.page_count == 0:
@@ -352,11 +342,9 @@ class ProcessOMR(Resource):
                                     img_path = os.path.join(input_dir, img_filename)
                                     pix.save(img_path)
                                     image_paths.append(img_path)
-                                    logger.info(f"Saved PDF page {i+1} to {img_path}")
                                     
                                 pdf_document.close()
                                 pdf_processed = True
-                                logger.info(f"Successfully processed PDF with PyMuPDF: {image_file.filename}")
                                 
                             except ImportError as e:
                                 logger.warning(f"PyMuPDF not available: {str(e)}. Will try pdf2image...")
@@ -367,10 +355,8 @@ class ProcessOMR(Resource):
                             if not pdf_processed:
                                 try:
                                     from pdf2image import convert_from_path
-                                    logger.info("Using pdf2image library to process PDF")
                                     
                                     try:
-                                        logger.info("Converting PDF with default poppler path")
                                         pdf_images = convert_from_path(pdf_path)
                                     except Exception as poppler_err:
                                         logger.warning(f"Default poppler path failed: {str(poppler_err)}. Trying alternate paths...")
@@ -385,7 +371,6 @@ class ProcessOMR(Resource):
                                         
                                         for poppler_path in poppler_paths:
                                             try:
-                                                logger.info(f"Trying poppler path: {poppler_path}")
                                                 pdf_images = convert_from_path(pdf_path, poppler_path=poppler_path)
                                                 break
                                             except Exception as path_err:
@@ -398,10 +383,8 @@ class ProcessOMR(Resource):
                                         img_path = os.path.join(input_dir, img_filename)
                                         image.save(img_path, 'JPEG')
                                         image_paths.append(img_path)
-                                        logger.info(f"Saved PDF page {i+1} to {img_path}")
                                     
                                     pdf_processed = True
-                                    logger.info(f"Successfully processed PDF with pdf2image: {image_file.filename}")
                                     
                                 except ImportError as e:
                                     logger.error(f"pdf2image not available: {str(e)}")
@@ -415,11 +398,10 @@ class ProcessOMR(Resource):
                                 
                         except Exception as pdf_error:
                             logger.error(f"Error processing PDF file {image_file.filename}: {str(pdf_error)}")
-                            return {'error': f'Error processing PDF file {image_file.filename}: {str(pdf_error)}. Check if poppler-utils is installed correctly.'}, 500
+                            return {'error': f'Error processing PDF file {image_file.filename}: {str(pdf_error)}. Check if poppler-utils is correctly installed.'}, 500
                         
                         try:
                             os.remove(pdf_path)
-                            logger.info(f"Removed original PDF file: {pdf_path}")
                         except Exception as rm_error:
                             logger.warning(f"Could not remove PDF file {pdf_path}: {str(rm_error)}")
                     
@@ -427,7 +409,6 @@ class ProcessOMR(Resource):
                         image_path = os.path.join(input_dir, image_file.filename)
                         image_file.save(image_path)
                         image_paths.append(image_path)
-                        logger.info(f"Saved image file to {image_path}")
                 
                 # Setup arguments for OMR processing
                 api_args = {
@@ -440,8 +421,6 @@ class ProcessOMR(Resource):
                 
                 tuning_config = CONFIG_DEFAULTS
                 template = Template(Path(template_path), tuning_config)
-                
-                logger.info(f"Processing directory: {input_dir}")
                 
                 # Use Path objects consistently for process_dir
                 root_dir = Path(app.config['INPUTS_DIR_ABS'])
@@ -459,45 +438,38 @@ class ProcessOMR(Resource):
                 
                 # Find CSV result file with fallback options
                 all_csv_files = list(output_dir_path.glob('**/*.csv'))
-                logger.info(f"All CSV files found in output directory: {[str(f) for f in all_csv_files]}")
                 
                 # Look in CheckedOMRs directory first
                 results_file = list(output_dir_path.glob('**/CheckedOMRs/*.csv'))
-                if results_file:
-                    logger.info(f"Found CSV in CheckedOMRs: {results_file[0]}")
                 
                 # Then look in Results folder
                 if not results_file:
                     results_file = list(output_dir_path.glob('**/Results/*.csv'))
-                    if results_file:
-                        logger.info(f"Found CSV in Results folder: {results_file[0]}")
                 
                 # Try Results_*.csv anywhere
                 if not results_file:
                     results_file = list(output_dir_path.glob('**/Results_*.csv'))
-                    if results_file:
-                        logger.info(f"Found Results_*.csv: {results_file[0]}")
                 
                 # Last resort: any CSV except ErrorFiles.csv
                 if not results_file:
                     non_error_csv = [f for f in all_csv_files if 'ErrorFiles.csv' not in str(f)]
                     if non_error_csv:
                         results_file = [non_error_csv[0]]
-                        logger.info(f"Using non-error CSV as fallback: {results_file[0]}")
                     else:
                         results_file = all_csv_files
-                        if results_file:
-                            logger.info(f"Using any CSV file as last resort: {results_file[0]}")
                 
                 if not results_file:
                     return {'error': 'Processing failed - no results generated'}, 500
                 
                 import pandas as pd
                 csv_file_path = results_file[0]
-                logger.info(f"Reading CSV results from: {csv_file_path}")
                 
-                df = pd.read_csv(csv_file_path)
-
+                # Read CSV with studentId and code always as strings
+                df = pd.read_csv(csv_file_path, dtype={'studentId': str, 'code': str})
+                
+                # Apply additional string conversion to ensure leading zeros are preserved
+                df = force_string_conversion(df, ['studentId', 'code'])
+                
                 # Replace NaN and infinite values
                 df = df.replace([np.inf, -np.inf], 'Infinity')
                 df = df.fillna("")
@@ -571,11 +543,9 @@ class ProcessOMR(Resource):
                 if clean_after:
                     try:
                         if os.path.exists(input_dir):
-                            logger.info(f"Cleaning input directory after processing: {input_dir}")
                             shutil.rmtree(input_dir)
                         
                         if os.path.exists(output_dir):
-                            logger.info(f"Cleaning output directory after processing: {output_dir}")
                             shutil.rmtree(output_dir)
                     except Exception as e:
                         logger.warning(f"Error cleaning directories after processing: {str(e)}")
@@ -611,8 +581,7 @@ class ProcessOMR(Resource):
         if isinstance(clean_after, str):
             clean_after = clean_after.lower() != 'false'
         
-        logger.info(f"Received GET request with parameters: directory_name={directory_name}, "
-                   f"clean_before={clean_before} (type: {type(clean_before)}), clean_after={clean_after} (type: {type(clean_after)})")
+        logger.info(f"Checking status for directory: {directory_name}")
         
         is_valid, error_message = validate_directory_name(directory_name)
         if not is_valid:
@@ -690,7 +659,13 @@ class Results(Resource):
             return {'error': 'No results found'}, 404
         
         import pandas as pd
-        df = pd.read_csv(csv_files[0])
+        # Read CSV with studentId and code always as strings
+        df = pd.read_csv(csv_files[0], dtype={'studentId': str, 'code': str})
+        
+        # Apply additional string conversion to ensure leading zeros are preserved
+        df = force_string_conversion(df, ['studentId', 'code'])
+        
+        # Replace NaN and infinite values
         df = df.replace([np.inf, -np.inf], 'Infinity')
         df = df.fillna("")
         
@@ -767,6 +742,25 @@ class Health(Resource):
         """Health check endpoint"""
         return {'status': 'healthy'}, 200
 
+@ns.route('/clean-folders')
+class CleanFolders(Resource):
+    @ns.doc('clean_folders',
+            responses={
+                200: 'Cleaned successfully',
+                500: 'Cleaning error'
+            })
+    def post(self):
+        """Delete contents of all directories: inputs, outputs, images"""
+        try:
+            total_items = clean_all_folders()
+            return {
+                'status': 'success',
+                'message': f'Deleted {total_items} items from all directories'
+            }, 200
+        except Exception as e:
+            logger.error(f"Error during manual cleaning: {str(e)}")
+            return {'error': f'Error cleaning directories: {str(e)}'}, 500
+
 @app.route('/api/swagger.json')
 def swagger_json():
     schema_json = api.__schema__
@@ -775,7 +769,20 @@ def swagger_json():
         mimetype='application/json'
     )
 
-# Function to clean images directory
+# Define a function to ensure leading zeros are preserved in string fields
+def force_string_conversion(data, string_fields):
+    """
+    Ensure all specified fields are converted to strings with leading zeros preserved.
+    This handles cases where pandas might have already converted strings to numbers.
+    """
+    for field in string_fields:
+        if field in data.columns:
+            # Convert to string and ensure leading zeros are preserved
+            data[field] = data[field].fillna('')
+            data[field] = data[field].apply(lambda x: str(x) if x != '' else '')
+    return data
+
+# Function to clean directory contents
 def clean_folder_contents(folder_path, folder_name):
     """Delete all contents inside the folder without deleting the folder itself"""
     try:
@@ -817,31 +824,14 @@ def clean_all_folders():
     logger.info(f"Cleaned a total of {total_items} items from all directories")
     return total_items
 
+# Setup scheduler for cleaning all folders
 scheduler = BackgroundScheduler()
 scheduler.add_job(clean_all_folders, 'cron', hour=0, minute=0)
 scheduler.start()
 
+# Stop scheduler when application exits
 import atexit
 atexit.register(lambda: scheduler.shutdown())
-
-@ns.route('/clean-folders')
-class CleanFolders(Resource):
-    @ns.doc('clean_folders',
-            responses={
-                200: 'Cleaned successfully',
-                500: 'Cleaning error'
-            })
-    def post(self):
-        """Delete contents of all directories: inputs, outputs, images"""
-        try:
-            total_items = clean_all_folders()
-            return {
-                'status': 'success',
-                'message': f'Deleted {total_items} items from all directories'
-            }, 200
-        except Exception as e:
-            logger.error(f"Error during manual cleaning: {str(e)}")
-            return {'error': f'Error cleaning directories: {str(e)}'}, 500
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000) 
