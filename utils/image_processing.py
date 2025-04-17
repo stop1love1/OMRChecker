@@ -14,14 +14,13 @@ MAX_CACHE_SIZE = 50
 
 def process_pdf_page(page_info):
     """Process a single PDF page with PyMuPDF"""
-    page, matrix, output_path, quality = page_info
+    page, matrix, output_path = page_info
     try:
-        pix = page.get_pixmap(matrix=matrix)
-        try:
-            pix.save(output_path, quality=quality)
-        except TypeError:
-            pix.save(output_path)
-            logger.debug(f"Using older PyMuPDF version without quality parameter support")
+        # Create pixmap with original size and color settings
+        pix = page.get_pixmap(matrix=matrix, alpha=False, colorspace="rgb")
+        # Save with original quality
+        pix.save(output_path)
+        # Release memory explicitly
         pix = None
         return output_path
     except Exception as e:
@@ -30,8 +29,9 @@ def process_pdf_page(page_info):
 
 def process_pdf2image_page(page_info):
     """Process a single page with pdf2image"""
-    image, output_path, quality = page_info
-    image.save(output_path, 'JPEG', quality=quality, optimize=True)
+    image, output_path = page_info
+    # Save the image
+    image.save(output_path, 'JPEG')
     return output_path
 
 class PDFProcessingPool:
@@ -61,7 +61,7 @@ class PDFProcessingPool:
         self.job_finished = threading.Condition(self.lock)
         self.job_results = {}
     
-    def process_pdf_batch(self, pdf_paths, input_dir, dpi=100, quality=70):
+    def process_pdf_batch(self, pdf_paths, input_dir):
         """Process multiple PDF files with resource management"""
         results = {}
         
@@ -85,11 +85,8 @@ class PDFProcessingPool:
         
         # Use process pool for CPU-bound tasks
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.pdf_workers) as executor:
-            # Adjust DPI based on number of files for better performance
-            if len(sorted_pdf_paths) > 20:
-                dpi = max(72, dpi - 20)  # Reduce DPI for large batches
-                quality = max(55, quality - 10)  # Reduce quality for large batches
-                logger.info(f"Large batch detected, reducing DPI to {dpi} and quality to {quality}")
+            # Preserve original quality
+            logger.info(f"Processing {len(sorted_pdf_paths)} PDFs with original settings")
             
             # Submit all PDF processing jobs
             future_to_pdf = {}
@@ -97,9 +94,7 @@ class PDFProcessingPool:
                 future = executor.submit(
                     self._process_single_pdf_monitored, 
                     pdf_path, 
-                    input_dir, 
-                    dpi, 
-                    quality
+                    input_dir
                 )
                 future_to_pdf[future] = pdf_path
             
@@ -132,15 +127,13 @@ class PDFProcessingPool:
         
         return results
     
-    def _process_single_pdf_monitored(self, pdf_path, input_dir, dpi, quality):
+    def _process_single_pdf_monitored(self, pdf_path, input_dir):
         """Process a single PDF with resource monitoring"""
-        # Check cache first
         path_str = str(pdf_path)
-        cache_key = f"{path_str}_{dpi}_{quality}"
+        cache_key = f"{path_str}_original"
         
         if cache_key in PDF_CACHE:
             cached_data = PDF_CACHE[cache_key]
-            # Verify the cached files still exist
             all_exist = True
             if "image_paths" in cached_data:
                 for img_path in cached_data["image_paths"]:
@@ -152,21 +145,17 @@ class PDFProcessingPool:
                     logger.info(f"Using cached version of PDF {os.path.basename(path_str)}")
                     return cached_data["image_paths"]
         
-        # Wait until we have resources available
         with self.lock:
             while self.active_jobs >= self.pdf_workers:
                 self.job_finished.wait()
             self.active_jobs += 1
         
         try:
-            # Add timeout to prevent hanging on corrupt PDFs
             try:
-                # Process the PDF with a timeout of 60 seconds
                 with concurrent.futures.ThreadPoolExecutor() as executor:
-                    future = executor.submit(process_single_pdf, pdf_path, input_dir, dpi, quality, self.page_workers)
+                    future = executor.submit(process_single_pdf, pdf_path, input_dir)
                     result = future.result(timeout=60)
                     
-                    # Cache the result
                     if result:
                         PDF_CACHE[cache_key] = {
                             "image_paths": result,
@@ -179,32 +168,25 @@ class PDFProcessingPool:
                 logger.error(f"Timeout processing PDF {pdf_path}")
                 return []
         finally:
-            # Release resources
             with self.lock:
                 self.active_jobs -= 1
                 self.job_finished.notify()
 
-def process_single_pdf(pdf_path, input_dir, dpi=100, quality=70, max_workers=4):
+def process_single_pdf(pdf_path, input_dir, max_workers=4):
     """
     Process a single PDF file and convert to images
     
     Args:
         pdf_path: Path to the PDF file
         input_dir: Directory to save the converted images
-        dpi: DPI for rendering (lower = faster but less detail)
-        quality: JPEG quality (lower = smaller files, faster)
         max_workers: Maximum number of concurrent workers for processing
         
     Returns:
         List of paths to converted images
     """
-    # Skip processing if file is too large (>50MB) unless forced
     file_size_mb = os.path.getsize(pdf_path) / (1024 * 1024)
     if file_size_mb > 50:
-        # For large files, reduce quality and DPI even more
-        logger.warning(f"Large PDF detected ({file_size_mb:.1f}MB), reducing quality settings")
-        dpi = max(72, dpi - 20)
-        quality = max(50, quality - 15)
+        logger.info(f"Large PDF detected ({file_size_mb:.1f}MB)")
     
     image_paths = []
     pdf_processed = False
@@ -235,9 +217,8 @@ def process_single_pdf(pdf_path, input_dir, dpi=100, quality=70, max_workers=4):
             logger.warning(f"PDF file has no pages: {os.path.basename(pdf_path)}")
             return image_paths
             
-        # Calculate matrix based on provided DPI (default 72dpi in PDF)
-        # Use lower DPI for faster processing
-        matrix = fitz.Matrix(dpi/72, dpi/72)
+        # Use Identity matrix to preserve exact size of original PDF
+        matrix = fitz.Identity
         
         # Check if PDF is encrypted
         if pdf_document.is_encrypted:
@@ -255,7 +236,7 @@ def process_single_pdf(pdf_path, input_dir, dpi=100, quality=70, max_workers=4):
                 page = pdf_document[i]
                 img_filename = f"{os.path.splitext(os.path.basename(pdf_path))[0]}_page_{i+1}.jpg"
                 img_path = os.path.join(input_dir, img_filename)
-                tasks.append((page, matrix, img_path, quality))
+                tasks.append((page, matrix, img_path))
             except Exception as page_error:
                 logger.warning(f"Error accessing page {i} in PDF {pdf_path}: {str(page_error)}")
                 continue
@@ -298,16 +279,19 @@ def process_single_pdf(pdf_path, input_dir, dpi=100, quality=70, max_workers=4):
             from pdf2image import convert_from_path
             
             try:
-                # Optimize pdf2image conversion with multithreading and lower DPI
+                # Use pdf2image
                 pdf_images = convert_from_path(
-                    pdf_path, 
-                    dpi=dpi,  # Lower DPI for faster processing
-                    thread_count=max(1, max_workers//2),  # Use parallel processing but avoid too many threads
-                    use_pdftocairo=True,  # Faster than pdftoppm
-                    output_folder=input_dir,  # Write directly to output folder
-                    fmt="jpeg",  # Use JPEG format - much faster than PNG
-                    jpegopt={"quality": quality, "optimize": True, "progressive": False},
-                    paths_only=True,  # Return paths only to reduce memory usage
+                    pdf_path,
+                    thread_count=max(1, max_workers//2),
+                    use_pdftocairo=True,
+                    output_folder=input_dir,
+                    fmt="jpeg",
+                    paths_only=True,
+                    size=None,  # No resizing - maintain original dimensions
+                    grayscale=False,
+                    transparent=False,
+                    use_cropbox=False,
+                    strict=False,
                 )
                 
                 # If paths_only works, we have the paths already
@@ -320,7 +304,7 @@ def process_single_pdf(pdf_path, input_dir, dpi=100, quality=70, max_workers=4):
                     for i, image in enumerate(pdf_images):
                         img_filename = f"{os.path.splitext(os.path.basename(pdf_path))[0]}_page_{i+1}.jpg"
                         img_path = os.path.join(input_dir, img_filename)
-                        tasks.append((image, img_path, quality))
+                        tasks.append((image, img_path))
                     
                     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                         future_to_image = {executor.submit(process_pdf2image_page, task): task for task in tasks}
@@ -340,24 +324,27 @@ def process_single_pdf(pdf_path, input_dir, dpi=100, quality=70, max_workers=4):
                 poppler_paths = [
                     '/usr/bin',
                     '/usr/local/bin',
-                    '/opt/homebrew/bin',  # MacOS Homebrew
+                    '/opt/homebrew/bin',
                     '/usr/lib/x86_64-linux-gnu',
-                    'C:/Program Files/poppler/bin',  # Windows paths
+                    'C:/Program Files/poppler/bin',
                     'C:/poppler/bin'
                 ]
                 
                 for poppler_path in poppler_paths:
                     try:
                         pdf_images = convert_from_path(
-                            pdf_path, 
-                            dpi=dpi,
+                            pdf_path,
                             thread_count=max(1, max_workers//2),
                             use_pdftocairo=True,
                             poppler_path=poppler_path,
                             output_folder=input_dir,
                             fmt="jpeg",
-                            jpegopt={"quality": quality, "optimize": True, "progressive": False},
-                            paths_only=True
+                            paths_only=True,
+                            size=None,
+                            grayscale=False,
+                            transparent=False,
+                            use_cropbox=False,
+                            strict=False,
                         )
                         
                         if isinstance(pdf_images, list) and pdf_images and isinstance(pdf_images[0], str):
@@ -370,7 +357,7 @@ def process_single_pdf(pdf_path, input_dir, dpi=100, quality=70, max_workers=4):
                         for i, image in enumerate(pdf_images):
                             img_filename = f"{os.path.splitext(os.path.basename(pdf_path))[0]}_page_{i+1}.jpg"
                             img_path = os.path.join(input_dir, img_filename)
-                            tasks.append((image, img_path, quality))
+                            tasks.append((image, img_path))
                         
                         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                             future_to_image = {executor.submit(process_pdf2image_page, task): task for task in tasks}
@@ -436,16 +423,15 @@ def fast_pdf_check(pdf_path):
             "error": str(e)
         }
 
-def process_pdf(pdf_path, input_dir, dpi=100, quality=70, max_workers=12):
+def process_pdf(pdf_path, input_dir, max_workers=12, **kwargs):
     """
     Process PDF file and convert to images
     
     Args:
         pdf_path: Path to the PDF file
         input_dir: Directory to save the converted images
-        dpi: DPI for rendering (lower = faster but less detail)
-        quality: JPEG quality (lower = smaller files, faster)
         max_workers: Maximum number of concurrent workers for processing
+        **kwargs: Additional arguments for backward compatibility (ignored)
         
     Returns:
         List of paths to converted images
@@ -461,14 +447,8 @@ def process_pdf(pdf_path, input_dir, dpi=100, quality=70, max_workers=12):
         logger.error(f"Invalid PDF file: {pdf_path}")
         return []
     
-    # For large PDFs (many pages), reduce DPI and quality
-    if info.get("page_count", 0) > 50:
-        dpi = max(72, dpi - 20)  # Minimum 72 DPI (1:1 scale)
-        quality = max(50, quality - 15)  # Minimum quality 50
-        logger.info(f"Large PDF detected ({info['page_count']} pages), reducing DPI to {dpi} and quality to {quality}")
-    
-    # For batch processing, use the monitored version
-    image_paths = pool._process_single_pdf_monitored(pdf_path, input_dir, dpi, quality)
+    # Process PDF
+    image_paths = pool._process_single_pdf_monitored(pdf_path, input_dir)
     
     end_time = time.time()
     processing_time = end_time - start_time
@@ -477,15 +457,14 @@ def process_pdf(pdf_path, input_dir, dpi=100, quality=70, max_workers=12):
     
     return image_paths
 
-def process_pdf_batch(pdf_paths, input_dir, dpi=100, quality=70):
+def process_pdf_batch(pdf_paths, input_dir, **kwargs):
     """
     Process multiple PDF files in a resource-managed batch
     
     Args:
         pdf_paths: List of paths to PDF files
         input_dir: Directory where to save the converted images
-        dpi: DPI for rendering (lower = faster but less detail)
-        quality: JPEG quality (lower = smaller files, faster)
+        **kwargs: Additional arguments for backward compatibility (ignored)
         
     Returns:
         Dictionary mapping PDF paths to their converted image paths
@@ -512,18 +491,11 @@ def process_pdf_batch(pdf_paths, input_dir, dpi=100, quality=70):
     valid_pdfs.sort(key=lambda x: x[1])
     sorted_pdf_paths = [p[0] for p in valid_pdfs]
     
-    # Adjust DPI based on batch size
-    if len(sorted_pdf_paths) > 20:
-        dpi = max(72, dpi - 20)  # Reduce DPI for large batches
-        quality = max(55, quality - 10)  # Reduce quality for large batches
-    elif len(sorted_pdf_paths) > 5:
-        dpi = max(80, dpi - 10)  # Slightly reduce DPI for medium batches
-    
     # Get singleton instance of processing pool
     pool = PDFProcessingPool.get_instance()
     
     # Process all PDFs with resource management
-    results = pool.process_pdf_batch(sorted_pdf_paths, input_dir, dpi, quality)
+    results = pool.process_pdf_batch(sorted_pdf_paths, input_dir)
     
     end_time = time.time()
     processing_time = end_time - start_time

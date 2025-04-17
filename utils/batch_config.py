@@ -1,5 +1,5 @@
 """
-Configuration for batch processing of PDFs and images with maximum quality
+Batch processing configuration options for OMRChecker.
 """
 import os
 import platform
@@ -16,111 +16,64 @@ if SYSTEM_INFO["cpu_count"] >= 8:
     DEFAULT_WORKERS = min(SYSTEM_INFO["cpu_count"], 24)
 else:
     HIGH_PERFORMANCE = False
-    DEFAULT_WORKERS = max(4, SYSTEM_INFO["cpu_count"])  
+    DEFAULT_WORKERS = max(4, SYSTEM_INFO["cpu_count"])
 
-BATCH_SIZES = {
-    "pdf_page_chunk": 50, 
-    "omr_file_chunk": 100, 
-    "result_chunk": 500,    
-}
 
 RESOURCE_LIMITS = {
-    "max_pdf_workers": min(DEFAULT_WORKERS + 4, 32),  
-    "max_page_workers": min(DEFAULT_WORKERS + 2, 24),  
-    "max_omr_workers": min(DEFAULT_WORKERS + 4, 32),  
+    "max_process_workers": 4,
+    "max_thread_workers": 12,
+    "max_pdf_workers": min(DEFAULT_WORKERS + 2, 16),
+    "max_page_workers": min(DEFAULT_WORKERS, 8),
+    "max_omr_workers": min(DEFAULT_WORKERS + 4, 32),
+    "max_memory_mb": 1024,
+}
+
+# Batch processing chunk sizes for optimizing memory use
+BATCH_SIZES = {
+    "max_files_per_batch": 50,
+    "max_pdfs_per_batch": 10,
+    "pdf_page_chunk": 20,
+    "image_chunk": 100,
+    "result_chunk": 500,
+    "omr_file_chunk": 100,
+}
+
+FILE_PATTERNS = {
+    "image_extensions": [".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp"],
+    "pdf_extensions": [".pdf"],
+    "valid_extensions": [".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".pdf"],
+    "prefixes_to_ignore": ["."],
+    "ignore_patterns": ["*_out.*", "*_marked.*", "*_copy.*", "*_template.*"],
 }
 
 PERFORMANCE_TUNING = {
-    "small_batch": {
-        "dpi": 300,               
-        "quality": 100,           
-        "processing_width": 1200, 
-        "save_image_level": 1,    
-        "show_image_level": 0,
-    },
-    "medium_batch": {
-        "dpi": 250,               
-        "quality": 95,            
-        "processing_width": 1100, 
-        "save_image_level": 1,
-        "show_image_level": 0,
-    },
-    "large_batch": {
-        "dpi": 200,               
-        "quality": 95,            
-        "processing_width": 1000, 
-        "save_image_level": 1,
-        "show_image_level": 0,
-    },
+    "save_marked_images": True,
+    "save_image_level": 1,
+    "maintain_original_size": True,
+    "show_image_level": 0,
+    "dpi": None,
+    "quality": None,
+    "processing_width": 800,
 }
 
 ULTRA_FAST = {
-    "dpi": 150,                  
-    "quality": 80,               
-    "processing_width": 800,     
+    "save_marked_images": False,
     "save_image_level": 0,
+    "maintain_original_size": True,
     "show_image_level": 0,
-}
-
-ULTRA_QUALITY = {
-    "dpi": 400,                     
-    "quality": 100,                  
-    "processing_width": 1500,       
-    "save_image_level": 1,          
-    "show_image_level": 0,
+    "dpi": None,
+    "quality": None,
+    "processing_width": 800,
 }
 
 HIGH_QUALITY = {
-    "dpi": 300,                     
-    "quality": 100,                  
-    "processing_width": 1200,       
-    "save_image_level": 1,
+    "save_marked_images": True,
+    "save_image_level": 2,
+    "maintain_original_size": True,
     "show_image_level": 0,
-}
-
-def get_batch_profile(batch_size, high_speed=False, high_quality=True):
-    """
-    Get the appropriate batch profile based on the number of files
-    
-    Args:
-        batch_size: Number of files in the batch
-        high_speed: Whether to prioritize speed over quality
-        high_quality: Whether to prioritize quality over speed (default True)
-        
-    Returns:
-        Dictionary of performance parameters
-    """
-    if high_quality and not high_speed:
-        return ULTRA_QUALITY
-    
-    if high_speed and not high_quality:
-        return ULTRA_FAST
-    
-    if batch_size <= 5:
-        return {
-            "dpi": 400,               
-            "quality": 100,           
-            "processing_width": 1500, 
-            "save_image_level": 1,    
-            "show_image_level": 0,
-        }
-    elif batch_size <= 20:
-        return PERFORMANCE_TUNING["small_batch"]
-    elif batch_size <= 50:
-        return PERFORMANCE_TUNING["medium_batch"]
-    else:
-        return PERFORMANCE_TUNING["large_batch"]
-
-COMPRESSION_OPTIONS = {
-    "jpg": {
-        "optimize": True,
-        "progressive": True,     
-        "quality": 100           
-    },
-    "png": {
-        "optimize": True,        
-        "compression_level": 9   
-    }
+    "dpi": None,
+    "quality": None,
+    "processing_width": 800,
 }
 
 MEMORY_MANAGEMENT = {
@@ -131,4 +84,41 @@ MEMORY_MANAGEMENT = {
     "prefetch_pages": 20,        
     "use_ram_disk": True,        
     "ram_disk_size_gb": 15.0,    
+}
+
+def get_batch_profile(batch_size, high_speed=False, high_quality=True):
+    """
+    Get the appropriate batch profile based on the number of files
+    
+    Args:
+        batch_size: Number of files in the batch
+        high_speed: Whether to prioritize speed over quality
+        high_quality: Whether to prioritize quality over speed
+        
+    Returns:
+        Dictionary of performance parameters
+    """
+    if high_quality and not high_speed:
+        return HIGH_QUALITY
+    
+    if high_speed and not high_quality:
+        return ULTRA_FAST
+    
+    if batch_size <= 5:
+        return {
+            "save_marked_images": True,
+            "save_image_level": 1,
+            "maintain_original_size": True,
+            "show_image_level": 0,
+            "dpi": None,
+            "quality": None,
+            "processing_width": 800,
+        }
+    
+    return PERFORMANCE_TUNING
+
+IMAGE_SAVE_OPTIONS = {
+    "format": "JPEG",              
+    "jpeg_quality": 95,            
+    "png_compression": 1,          
 } 
