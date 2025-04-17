@@ -305,14 +305,26 @@ def process_files(
         "Errors": threading.Lock()
     }
     
-    # Calculate optimum number of workers based on CPU count
-    max_workers = max(1, min(os.cpu_count(), 8))
+    try:
+        # Get optimized batch settings if they exist
+        from utils.batch_config import BATCH_SIZES, RESOURCE_LIMITS
+        batch_size = BATCH_SIZES.get("omr_file_chunk", 20)
+        max_workers = RESOURCE_LIMITS.get("max_omr_workers", min(os.cpu_count(), 8))
+    except ImportError:
+        # Default settings if batch_config is not available
+        batch_size = min(20, len(omr_files))
+        max_workers = max(1, min(os.cpu_count(), 8))
     
     # Group files into optimal batch sizes to balance parallelism and memory usage
-    batch_size = min(10, len(omr_files))
     file_batches = [omr_files[i:i+batch_size] for i in range(0, len(omr_files), batch_size)]
     
-    for batch in file_batches:
+    # Pre-process high frequency files first (optional sorting)
+    if len(file_batches) > 1:
+        logger.info(f"Processing {len(omr_files)} files in {len(file_batches)} batches")
+    
+    for batch_idx, batch in enumerate(file_batches):
+        batch_start_time = time()
+        
         # Process each batch of files in parallel
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             # Use partial to pass the fixed arguments
@@ -338,6 +350,15 @@ def process_files(
                     
                 except Exception as exc:
                     logger.error(f"File processing generated an exception: {exc}")
+        
+        # Log batch processing time for monitoring
+        if len(file_batches) > 1:
+            batch_time = time() - batch_start_time
+            logger.info(f"Batch {batch_idx+1}/{len(file_batches)} processed in {batch_time:.2f} seconds ({len(batch)} files)")
+            
+            # Force garbage collection after each batch to prevent memory issues
+            import gc
+            gc.collect()
 
     total_time = time() - start_time
     logger.info(f"Processing completed in {total_time:.2f} seconds for {files_counter} files")

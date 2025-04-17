@@ -181,41 +181,83 @@ def setup_routes(app):
                         if not os.path.exists(marker_path):
                             logger.error(f"Failed to save marker file at {marker_path}")
                     
-                    image_paths = []
+                    # Process PDF files in batches
+                    pdf_files = []
+                    regular_image_files = []
                     
                     for image_file in args['image_files']:
                         if image_file.filename.lower().endswith('.pdf'):
-                            logger.info(f"Processing PDF file: {image_file.filename}")
-                            
+                            logger.info(f"Found PDF file: {image_file.filename}")
                             pdf_path = os.path.join(input_dir, image_file.filename)
                             image_file.save(pdf_path)
+                            pdf_files.append(pdf_path)
+                        else:
+                            image_path = os.path.join(input_dir, image_file.filename)
+                            image_file.save(image_path)
+                            regular_image_files.append(image_path)
+                    
+                    image_paths = regular_image_files.copy()
+                    
+                    # Process PDFs in optimized batch mode if there are many files
+                    if pdf_files:
+                        logger.info(f"Processing {len(pdf_files)} PDF files in batch mode")
+                        pdf_start_time = time.time()
+                        
+                        try:
+                            from utils.image_processing import process_pdf_batch
+                            from utils.batch_config import get_batch_profile
                             
-                            try:
-                                # Optimize PDF processing with much lower DPI and more parallelism
-                                new_image_paths = process_pdf(
-                                    pdf_path, 
-                                    input_dir,
-                                    dpi=100,  # Lower DPI for speed
-                                    quality=70,  # Lower quality for faster processing
-                                    max_workers=12  # More parallel processing
-                                )
-                                image_paths.extend(new_image_paths)
+                            # Get appropriate batch profile based on number of files
+                            batch_profile = get_batch_profile(len(pdf_files))
+                            
+                            pdf_results = process_pdf_batch(
+                                pdf_files, 
+                                input_dir,
+                                dpi=batch_profile["dpi"],
+                                quality=batch_profile["quality"]
+                            )
+                            
+                            # Collect all generated image paths
+                            for pdf_path, paths in pdf_results.items():
+                                image_paths.extend(paths)
                                 
                                 # Remove the original PDF to save space
                                 try:
                                     os.remove(pdf_path)
                                 except Exception as rm_error:
                                     logger.warning(f"Could not remove PDF file {pdf_path}: {str(rm_error)}")
-                                
-                            except Exception as pdf_error:
-                                logger.error(f"Error processing PDF file {image_file.filename}: {str(pdf_error)}")
-                                return {'error': f'Error processing PDF file {image_file.filename}: {str(pdf_error)}. Check if poppler-utils is correctly installed.'}, 500
-                        
-                        else:
-                            image_path = os.path.join(input_dir, image_file.filename)
-                            image_file.save(image_path)
-                            image_paths.append(image_path)
-                    
+                            
+                            pdf_total_time = time.time() - pdf_start_time
+                            logger.info(f"Batch PDF processing completed in {pdf_total_time:.2f} seconds for {len(pdf_files)} PDFs")
+                            
+                        except Exception as batch_error:
+                            logger.error(f"Error in batch PDF processing: {str(batch_error)}")
+                            logger.info("Falling back to individual PDF processing")
+                            
+                            # Use traditional processing as fallback
+                            from utils.image_processing import process_pdf
+                            
+                            for pdf_path in pdf_files:
+                                try:
+                                    # Use optimized PDF processing with much lower DPI and more parallelism
+                                    new_image_paths = process_pdf(
+                                        pdf_path, 
+                                        input_dir,
+                                        dpi=100,  # Lower DPI for speed
+                                        quality=70,  # Lower quality for faster processing
+                                        max_workers=12  # More parallel processing
+                                    )
+                                    image_paths.extend(new_image_paths)
+                                    
+                                    # Remove the original PDF to save space
+                                    try:
+                                        os.remove(pdf_path)
+                                    except Exception as rm_error:
+                                        logger.warning(f"Could not remove PDF file {pdf_path}: {str(rm_error)}")
+                                    
+                                except Exception as pdf_error:
+                                    logger.error(f"Error processing PDF file {pdf_path}: {str(pdf_error)}")
+                                    
                     # Setup arguments for OMR processing with optimized performance settings
                     api_args = {
                         'input_paths': [input_dir],
@@ -228,10 +270,20 @@ def setup_routes(app):
                     # Use optimized tuning configuration for faster processing
                     tuning_config = CONFIG_DEFAULTS
                     
-                    # Set optimized processing parameters
-                    tuning_config.dimensions.processing_width = 800  # Lower resolution processing
-                    tuning_config.outputs.save_image_level = 0  # Reduce image saving for speed
-                    tuning_config.outputs.show_image_level = 0  # Disable image display for speed
+                    # Apply batch-appropriate settings if we had PDF files
+                    if pdf_files:
+                        from utils.batch_config import get_batch_profile
+                        batch_profile = get_batch_profile(len(pdf_files))
+                        
+                        # Set optimized processing parameters based on batch size
+                        tuning_config.dimensions.processing_width = batch_profile["processing_width"]
+                        tuning_config.outputs.save_image_level = batch_profile["save_image_level"]
+                        tuning_config.outputs.show_image_level = batch_profile["show_image_level"]
+                    else:
+                        # Default settings for non-PDF processing
+                        tuning_config.dimensions.processing_width = 800
+                        tuning_config.outputs.save_image_level = 0
+                        tuning_config.outputs.show_image_level = 0
                     
                     template = Template(Path(template_path), tuning_config)
                     
