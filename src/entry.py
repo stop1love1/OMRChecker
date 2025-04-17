@@ -10,9 +10,12 @@ import os
 from csv import QUOTE_NONNUMERIC
 from pathlib import Path
 from time import time
+import concurrent.futures
+from functools import partial
 
 import cv2
 import pandas as pd
+import numpy as np
 from rich.table import Table
 
 from src import constants
@@ -34,41 +37,6 @@ def entry_point(input_dir, args):
         raise Exception(f"Given input directory does not exist: '{input_dir}'")
     curr_dir = input_dir
     return process_dir(input_dir, curr_dir, args)
-
-
-def print_config_summary(
-    curr_dir,
-    omr_files,
-    template,
-    tuning_config,
-    local_config_path,
-    evaluation_config,
-    args,
-):
-    logger.info("")
-    table = Table(title="Current Configurations", show_header=False, show_lines=False)
-    table.add_column("Key", style="cyan", no_wrap=True)
-    table.add_column("Value", style="magenta")
-    table.add_row("Directory Path", f"{curr_dir}")
-    table.add_row("Count of Images", f"{len(omr_files)}")
-    table.add_row("Set Layout Mode ", "ON" if args["setLayout"] else "OFF")
-    table.add_row(
-        "Markers Detection",
-        "ON" if "CropOnMarkers" in template.pre_processors else "OFF",
-    )
-    table.add_row("Auto Alignment", f"{tuning_config.alignment_params.auto_align}")
-    table.add_row("Detected Template Path", f"{template}")
-    if local_config_path:
-        table.add_row("Detected Local Config", f"{local_config_path}")
-    if evaluation_config:
-        table.add_row("Detected Evaluation Config", f"{evaluation_config}")
-
-    table.add_row(
-        "Detected pre-processors",
-        f"{[pp.__class__.__name__ for pp in template.pre_processors]}",
-    )
-    console.print(table, justify="center")
-
 
 def process_dir(
     root_dir,
@@ -140,15 +108,6 @@ def process_dir(
         setup_dirs_for_paths(paths)
         outputs_namespace = setup_outputs_for_template(paths, template)
 
-        print_config_summary(
-            curr_dir,
-            omr_files,
-            template,
-            tuning_config,
-            local_config_path,
-            evaluation_config,
-            args,
-        )
         if args["setLayout"]:
             show_template_layouts(omr_files, template, tuning_config)
         else:
@@ -195,30 +154,21 @@ def show_template_layouts(omr_files, template, tuning_config):
         )
 
 
-def process_files(
-    omr_files,
-    template,
-    tuning_config,
-    evaluation_config,
-    outputs_namespace,
-):
-    start_time = int(time())
-    files_counter = 0
-    STATS.files_not_moved = 0
-
-    for file_path in omr_files:
-        files_counter += 1
+# Helper function to process a single file for parallel processing
+def process_single_file(file_path, template, tuning_config, evaluation_config, outputs_namespace):
+    try:
         file_name = file_path.name
-
+        
+        # Read image with optimized flag
         in_omr = cv2.imread(str(file_path), cv2.IMREAD_GRAYSCALE)
-
-        logger.info("")
-        logger.info(
-            f"({files_counter}) Opening image: \t'{file_path}'\tResolution: {in_omr.shape}"
-        )
-
+        if in_omr is None:
+            return {"error": "Failed to read image", "file_path": file_path}
+            
+        # Create a new template instance ops for thread safety
+        image_instance_ops = template.image_instance_ops.__class__(tuning_config)
+        template.image_instance_ops = image_instance_ops
+        
         template.image_instance_ops.reset_all_save_img()
-
         template.image_instance_ops.append_save_img(1, in_omr)
 
         in_omr = template.image_instance_ops.apply_preprocessors(
@@ -247,91 +197,150 @@ def process_files(
                     header=False,
                     index=False,
                 )
-            continue
+            return {"status": "error", "file_path": file_path, "error_type": "NO_MARKER_ERR"}
 
         # uniquify
         file_id = str(file_name)
         save_dir = outputs_namespace.paths.save_marked_dir
-        (
-            response_dict,
-            final_marked,
-            multi_marked,
-            _,
-        ) = template.image_instance_ops.read_omr_response(
-            template, image=in_omr, name=file_id, save_dir=save_dir
-        )
-
-        # TODO: move inner try catch here
-        # concatenate roll nos, set unmarked responses, etc
-        omr_response = get_concatenated_response(response_dict, template)
-
-        if (
-            evaluation_config is None
-            or not evaluation_config.get_should_explain_scoring()
-        ):
-            logger.info(f"Read Response: \n{omr_response}")
-
-        score = 0
-        if evaluation_config is not None:
-            score = evaluate_concatenated_response(
-                omr_response, evaluation_config, file_path, outputs_namespace.paths.evaluation_dir
-            )
-            logger.info(
-                f"(/{files_counter}) Graded with score: {round(score, 2)}\t for file: '{file_id}'"
-            )
-        else:
-            logger.info(f"(/{files_counter}) Processed file: '{file_id}'")
-
-        if tuning_config.outputs.show_image_level >= 2:
-            InteractionUtils.show(
-                f"Final Marked Bubbles : '{file_id}'",
-                ImageUtils.resize_util_h(
-                    final_marked, int(tuning_config.dimensions.display_height * 1.3)
-                ),
-                1,
-                1,
-                config=tuning_config,
+        
+        try:
+            (
+                response_dict,
+                final_marked,
+                multi_marked,
+                _,
+            ) = template.image_instance_ops.read_omr_response(
+                template, image=in_omr, name=file_id, save_dir=save_dir
             )
 
-        resp_array = []
-        for k in template.output_columns:
-            resp_array.append(omr_response[k])
+            # concatenate roll nos, set unmarked responses, etc
+            omr_response = get_concatenated_response(response_dict, template)    
 
-        outputs_namespace.OUTPUT_SET.append([file_name] + resp_array)
-
-        if multi_marked == 0 or not tuning_config.outputs.filter_out_multimarked_files:
-            STATS.files_not_moved += 1
-            new_file_path = save_dir.joinpath(file_id)
-            # Enter into Results sheet-
-            results_line = [file_name, file_path, new_file_path, score] + resp_array
-            # Write/Append to results_line file(opened in append mode)
-            pd.DataFrame(results_line, dtype=str).T.to_csv(
-                outputs_namespace.files_obj["Results"],
-                mode="a",
-                quoting=QUOTE_NONNUMERIC,
-                header=False,
-                index=False,
-            )
-        else:
-            # multi_marked file
-            logger.info(f"[{files_counter}] Found multi-marked file: '{file_id}'")
-            new_file_path = outputs_namespace.paths.multi_marked_dir.joinpath(file_name)
-            if check_and_move(
-                constants.ERROR_CODES.MULTI_BUBBLE_WARN, file_path, new_file_path
-            ):
-                mm_line = [file_name, file_path, new_file_path, "NA"] + resp_array
-                pd.DataFrame(mm_line, dtype=str).T.to_csv(
-                    outputs_namespace.files_obj["MultiMarked"],
-                    mode="a",
-                    quoting=QUOTE_NONNUMERIC,
-                    header=False,
-                    index=False,
+            # Evaluation output (without detailed logging)
+            score = 0
+            if evaluation_config is not None:
+                score = evaluate_concatenated_response(
+                    omr_response, evaluation_config, file_path, outputs_namespace.paths.evaluation_dir
                 )
-            # else:
-            #     TODO:  Add appropriate record handling here
-            #     pass
 
-    print_stats(start_time, files_counter, tuning_config)
+            if tuning_config.outputs.show_image_level >= 2:
+                InteractionUtils.show(
+                    f"Final Marked Bubbles : '{file_id}'",
+                    ImageUtils.resize_util_h(
+                        final_marked, int(tuning_config.dimensions.display_height * 1.3)
+                    ),
+                    1,
+                    1,
+                    config=tuning_config,
+                )
+
+            resp_array = []
+            for k in template.output_columns:
+                resp_array.append(omr_response[k])
+
+            # Thread-safe append to output set
+            with outputs_namespace.output_lock:
+                outputs_namespace.OUTPUT_SET.append([file_name] + resp_array)
+
+            if multi_marked == 0 or not tuning_config.outputs.filter_out_multimarked_files:
+                STATS.files_not_moved += 1
+                new_file_path = save_dir.joinpath(file_id)
+                # Enter into Results sheet-
+                results_line = [file_name, file_path, new_file_path, score] + resp_array
+                # Write/Append to results_line file(opened in append mode)
+                # Lock to avoid concurrent writes
+                with outputs_namespace.file_locks["Results"]:
+                    pd.DataFrame(results_line, dtype=str).T.to_csv(
+                        outputs_namespace.files_obj["Results"],
+                        mode="a",
+                        quoting=QUOTE_NONNUMERIC,
+                        header=False,
+                        index=False,
+                    )
+                return {"status": "success", "file_path": file_path, "multi_marked": False}
+            else:
+                # multi_marked file
+                new_file_path = outputs_namespace.paths.multi_marked_dir.joinpath(file_name)
+                if check_and_move(
+                    constants.ERROR_CODES.MULTI_BUBBLE_WARN, file_path, new_file_path
+                ):
+                    mm_line = [file_name, file_path, new_file_path, "NA"] + resp_array
+                    # Lock to avoid concurrent writes
+                    with outputs_namespace.file_locks["MultiMarked"]:
+                        pd.DataFrame(mm_line, dtype=str).T.to_csv(
+                            outputs_namespace.files_obj["MultiMarked"],
+                            mode="a",
+                            quoting=QUOTE_NONNUMERIC,
+                            header=False,
+                            index=False,
+                        )
+                return {"status": "success", "file_path": file_path, "multi_marked": True}
+                
+        except Exception as e:
+            logger.error(f"Error processing file {file_path}: {str(e)}")
+            return {"status": "error", "file_path": file_path, "error": str(e)}
+            
+    except Exception as e:
+        logger.error(f"Error in process_single_file: {str(e)}")
+        return {"status": "error", "file_path": file_path, "error": str(e)}
+
+
+def process_files(
+    omr_files,
+    template,
+    tuning_config,
+    evaluation_config,
+    outputs_namespace,
+):
+    start_time = time()
+    files_counter = 0
+    STATS.files_not_moved = 0
+    
+    # Add thread synchronization to outputs_namespace
+    import threading
+    outputs_namespace.output_lock = threading.Lock()
+    outputs_namespace.file_locks = {
+        "Results": threading.Lock(),
+        "MultiMarked": threading.Lock(),
+        "Errors": threading.Lock()
+    }
+    
+    # Calculate optimum number of workers based on CPU count
+    max_workers = max(1, min(os.cpu_count(), 8))
+    
+    # Group files into optimal batch sizes to balance parallelism and memory usage
+    batch_size = min(10, len(omr_files))
+    file_batches = [omr_files[i:i+batch_size] for i in range(0, len(omr_files), batch_size)]
+    
+    for batch in file_batches:
+        # Process each batch of files in parallel
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Use partial to pass the fixed arguments
+            process_func = partial(
+                process_single_file,
+                template=template,
+                tuning_config=tuning_config,
+                evaluation_config=evaluation_config,
+                outputs_namespace=outputs_namespace
+            )
+            
+            # Submit batch for processing
+            futures = {executor.submit(process_func, file_path): file_path for file_path in batch}
+            
+            # Process results as they complete
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    result = future.result()
+                    files_counter += 1
+                    
+                    if result.get("status") == "error":
+                        logger.warning(f"Failed to process file: {result.get('file_path')} - {result.get('error')}")
+                    
+                except Exception as exc:
+                    logger.error(f"File processing generated an exception: {exc}")
+
+    total_time = time() - start_time
+    logger.info(f"Processing completed in {total_time:.2f} seconds for {files_counter} files")
 
 
 def check_and_move(error_code, file_path, filepath2):
@@ -343,13 +352,6 @@ def check_and_move(error_code, file_path, filepath2):
 def print_stats(start_time, files_counter, tuning_config):
     time_checking = max(1, round(time() - start_time, 2))
     log = logger.info
-    log("")
-    log(f"{'Total file(s) moved': <27}: {STATS.files_moved}")
-    log(f"{'Total file(s) not moved': <27}: {STATS.files_not_moved}")
-    log("--------------------------------")
-    log(
-        f"{'Total file(s) processed': <27}: {files_counter} ({'Sum Tallied!' if files_counter == (STATS.files_moved + STATS.files_not_moved) else 'Not Tallying!'})"
-    )
 
     if tuning_config.outputs.show_image_level <= 0:
         log(

@@ -31,10 +31,8 @@ class Paths:
 
 
 def setup_dirs_for_paths(paths):
-    logger.info("Checking Directories...")
     for save_output_dir in [paths.save_marked_dir]:
         if not os.path.exists(save_output_dir):
-            logger.info(f"Created : {save_output_dir}")
             os.makedirs(save_output_dir)
             os.mkdir(save_output_dir.joinpath("stack"))
             os.mkdir(save_output_dir.joinpath("_MULTI_"))
@@ -42,19 +40,16 @@ def setup_dirs_for_paths(paths):
 
     for save_output_dir in [paths.manual_dir, paths.results_dir, paths.evaluation_dir]:
         if not os.path.exists(save_output_dir):
-            logger.info(f"Created : {save_output_dir}")
             os.makedirs(save_output_dir)
 
     for save_output_dir in [paths.multi_marked_dir, paths.errors_dir]:
         if not os.path.exists(save_output_dir):
-            logger.info(f"Created : {save_output_dir}")
             os.makedirs(save_output_dir)
 
 
 def setup_outputs_for_template(paths, template):
     # TODO: consider moving this into a class instance
     ns = argparse.Namespace()
-    logger.info("Checking Files...")
 
     # Include current output paths
     ns.paths = paths
@@ -77,7 +72,6 @@ def setup_outputs_for_template(paths, template):
 
     for file_key, file_name in ns.filesMap.items():
         if not os.path.exists(file_name):
-            logger.info(f"Created new file: '{file_name}'")
             # moved handling of files to pandas csv writer
             ns.files_obj[file_key] = file_name
             # Create Header Columns
@@ -89,7 +83,6 @@ def setup_outputs_for_template(paths, template):
                 index=False,
             )
         else:
-            logger.info(f"Present : appending to '{file_name}'")
             ns.files_obj[file_key] = open(file_name, "a")
 
     return ns

@@ -242,12 +242,10 @@ class ImageInstanceOps:
             # , "Mean Intensity Histogram",plot_show=True, sort_in_plot=True)
             global_thr, _, _ = self.get_global_threshold(all_q_vals, looseness=4)
 
-            logger.info(
-                f"Thresholding: \tglobal_thr: {round(global_thr, 2)} \tglobal_std_THR: {round(global_std_thresh, 2)}\t{'(Looks like a Xeroxed OMR)' if (global_thr == 255) else ''}"
-            )
-            # plt.show()
-            # hist = getPlotImg()
-            # InteractionUtils.show("StdHist", hist, 0, 1,config=config)
+            # Comment out detailed thresholding logs
+            # logger.info(
+            #     f"Thresholding: \tglobal_thr: {round(global_thr, 2)} \tglobal_std_THR: {round(global_std_thresh, 2)}\t{'(Looks like a Xeroxed OMR)' if (global_thr == 255) else ''}"
+            # )
 
             # if(config.outputs.show_image_level>=1):
             #     hist = getPlotImg()

@@ -46,7 +46,6 @@ def validate_evaluation_json(json_data, evaluation_path):
 
 
 def validate_template_json(json_data, template_path):
-    logger.info(f"Loading template.json: {template_path}")
     try:
         validate(instance=json_data, schema=SCHEMA_JSONS["template"])
     except jsonschema.exceptions.ValidationError as _err:  # NOQA

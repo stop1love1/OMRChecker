@@ -50,7 +50,6 @@ class ProcessorManager:
         self.processors = {}
         self.seen_paths = []
 
-        logger.info(f'Loading processors from "{self.processors_dir}"...')
         self.walk_package(self.processors_dir)
 
     def walk_package(self, package):
@@ -72,8 +71,6 @@ class ProcessorManager:
                     if issubclass(c, Processor) & (c is not Processor):
                         self.processors[c.__name__] = c
                         loaded_packages.append(c.__name__)
-
-        logger.info(f"Loaded processors: {loaded_packages}")
 
 
 # Singleton export
