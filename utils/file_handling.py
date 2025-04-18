@@ -56,8 +56,6 @@ def save_to_public_images(image_path, prefix, api_host, public_images_dir):
         # Create parent directory if it doesn't exist
         os.makedirs(os.path.dirname(public_path), exist_ok=True)
         
-        # Log paths for debugging
-        logger.info(f"Copying from {image_path} to {public_path}")
         
         # Check if source exists
         if not os.path.exists(image_path):
@@ -67,7 +65,6 @@ def save_to_public_images(image_path, prefix, api_host, public_images_dir):
         shutil.copy2(image_path, public_path)
         
         result_url = f"{api_host}/images/{filename}"
-        logger.info(f"Created public image URL: {result_url}")
         return result_url
     except Exception as e:
         logger.error(f"Failed to save public image: {e}")
