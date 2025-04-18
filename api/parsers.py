@@ -11,13 +11,23 @@ def setup_parsers():
     upload_parser.add_argument('template_file', 
                               location='files',
                               type=FileStorage, 
-                              required=True,
+                              required=False,
                               help='JSON template file')
     upload_parser.add_argument('marker_file', 
                               location='files',
                               type=FileStorage, 
                               required=False,
                               help='Marker image file for template (PNG, JPG, JPEG)')
+    upload_parser.add_argument('template_url', 
+                              type=str, 
+                              required=False,
+                              location='form',
+                              help='URL to template JSON file')
+    upload_parser.add_argument('marker_url', 
+                              type=str, 
+                              required=False,
+                              location='form',
+                              help='URL to marker image file (PNG, JPG, JPEG)')
     upload_parser.add_argument('image_files', 
                               location='files',
                               type=FileStorage, 
@@ -44,6 +54,11 @@ def setup_parsers():
                               required=False,
                               default=False,
                               help='Clean directories after processing and saving results')
+    upload_parser.add_argument('batch_size', 
+                              type=int, 
+                              required=False,
+                              default=50,
+                              help='Number of files per batch for batch processing')
 
     get_params_parser = reqparse.RequestParser()
     get_params_parser.add_argument('directory_name', 

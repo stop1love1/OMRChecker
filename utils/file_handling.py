@@ -275,8 +275,6 @@ def download_file_from_url(url, target_dir, app_config=None):
         # Ensure parent directory exists before downloading
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
         
-        logger.info(f"Downloading file from URL: {url}")
-        
         # Use requests session with proper timeout and headers
         session = requests.Session()
         session.headers.update({
@@ -295,7 +293,6 @@ def download_file_from_url(url, target_dir, app_config=None):
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
         
-        logger.info(f"Successfully downloaded file to: {file_path}")
         return file_path
     
     except Exception as e:

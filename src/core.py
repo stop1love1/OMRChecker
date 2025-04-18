@@ -951,10 +951,6 @@ class ImageInstanceOps:
             try:
                 # If resize is True or images have different dimensions, resize all to match the first
                 if resize or any(img.shape[:2] != valid_images[0].shape[:2] for img in valid_images[1:]):
-                    if resize:
-                        logger.info(f"Resizing all images to {w}x{h}")
-                    else:
-                        logger.info(f"Images have different dimensions, doing minimal resizing")
                         
                     images_resized = []
                     for img in valid_images:
