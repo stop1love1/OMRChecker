@@ -8,8 +8,15 @@ import uuid
 import datetime
 from pathlib import Path
 import uuid
+import requests
+from urllib.parse import urlparse
+import urllib3
+from urllib.parse import quote
 
 from src.logger import logger
+
+# Disable insecure request warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 def transform_result_format(result_data):
     """Transform flat result keys (q1, q2, etc.) into structured format with answers array"""
@@ -77,13 +84,196 @@ def clean_folder_contents(folder_path, folder_name):
         logger.error(f"Error during scheduled cleaning of {folder_name} directory: {str(e)}")
         return 0
 
-def clean_all_folders(config):
-    """Delete contents of all directories: inputs, outputs, images"""
+def clean_all_folders(app_config):
+    """Clean all data directories"""
     total_items = 0
     
-    total_items += clean_folder_contents(config['INPUTS_DIR_ABS'], "inputs")
-    total_items += clean_folder_contents(config['OUTPUTS_DIR_ABS'], "outputs")
-    total_items += clean_folder_contents(config['PUBLIC_IMAGES_DIR_ABS'], "images")
+    # Clean inputs directory
+    inputs_dir = Path(app_config['INPUTS_DIR_ABS'])
+    if inputs_dir.exists():
+        items = list(inputs_dir.glob("**/*"))
+        total_items += len(items)
+        shutil.rmtree(inputs_dir)
+        os.makedirs(inputs_dir)
+        
+    # Clean outputs directory
+    outputs_dir = Path(app_config['OUTPUTS_DIR_ABS'])
+    if outputs_dir.exists():
+        items = list(outputs_dir.glob("**/*"))
+        total_items += len(items)
+        shutil.rmtree(outputs_dir)
+        os.makedirs(outputs_dir)
     
-    logger.info(f"Cleaned a total of {total_items} items from all directories")
+    # Clean public images directory
+    public_images_dir = Path(app_config['PUBLIC_IMAGES_DIR_ABS'])
+    if public_images_dir.exists():
+        items = list(public_images_dir.glob("*"))
+        total_items += len(items)
+        for item in items:
+            try:
+                if item.is_file():
+                    item.unlink()
+                elif item.is_dir():
+                    shutil.rmtree(item)
+            except Exception as e:
+                logger.warning(f"Error removing {item}: {str(e)}")
+    
+    return total_items
+
+def download_file_from_url(url, target_dir, app_config=None):
+    """
+    Download a file from a URL to the target directory
+    If URL starts with API_HOST, read directly from filesystem
+    
+    Args:
+        url: The URL to download from
+        target_dir: Directory to save the file
+        app_config: Flask app config to check current host
+        
+    Returns:
+        Path to the downloaded file or None if download failed
+    """
+    try:
+        # Handle spaces or special characters in URL
+        url = url.strip()
+        if ' ' in url:
+            logger.warning(f"URL contains spaces, attempting to fix: {url}")
+            url = quote(url, safe=':/?&=@#')
+        
+        # Parse URL to get path
+        parsed_url = urlparse(url)
+        filename = os.path.basename(parsed_url.path)
+        
+        logger.info(f"Processing URL {url}")
+        
+        # Check if URL starts with API_HOST
+        is_local_file = False
+        if app_config and 'API_HOST' in app_config:
+            api_host = app_config['API_HOST']
+            
+            # Direct string comparison - check if URL starts with API_HOST
+            if url.startswith(api_host):
+                is_local_file = True
+                logger.info(f"Detected local file URL that starts with {api_host}")
+        
+        if is_local_file:
+            relative_path = url[len(app_config['API_HOST']):]
+            
+            if relative_path.startswith('/static/uploads/'):
+                source_path = os.path.join(
+                    app_config.get('STATIC_FOLDER', 'static'),
+                    'uploads',
+                    os.path.basename(relative_path)
+                )
+                
+                if os.path.exists(source_path):
+                    target_path = os.path.join(target_dir, os.path.basename(relative_path))
+                    shutil.copy2(source_path, target_path)
+                    logger.info(f"Using local file: {source_path} -> {target_path}")
+                    return target_path
+                else:
+                    logger.warning(f"Local file not found: {source_path}")
+            
+            elif relative_path.startswith('/images/'):
+                source_path = os.path.join(
+                    app_config.get('PUBLIC_IMAGES_DIR_ABS', 'public/images'),
+                    os.path.basename(relative_path)
+                )
+                
+                if os.path.exists(source_path):
+                    target_path = os.path.join(target_dir, os.path.basename(relative_path))
+                    shutil.copy2(source_path, target_path)
+                    logger.info(f"Using local file: {source_path} -> {target_path}")
+                    return target_path
+                else:
+                    logger.warning(f"Local file not found: {source_path}")
+        
+        # If not local or local file not found, download from URL
+        if not filename or filename == '':
+            timestamp = int(time.time())
+            unique_id = str(uuid.uuid4())[:8]
+            extension = os.path.splitext(parsed_url.path)[1].lower()
+            if not extension:
+                extension = '.jpg'
+                
+            filename = f"url_file_{timestamp}_{unique_id}{extension}"
+        
+        file_path = os.path.join(target_dir, filename)
+        
+        logger.info(f"Downloading file from URL: {url}")
+        
+        # Use requests session with proper timeout and headers
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        })
+        
+        response = session.get(
+            url, 
+            stream=True, 
+            timeout=30, 
+            verify=False
+        )
+        response.raise_for_status()
+        
+        with open(file_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+        
+        logger.info(f"Successfully downloaded file to: {file_path}")
+        return file_path
+    
+    except Exception as e:
+        logger.error(f"Error processing URL {url}: {str(e)}")
+        return None
+
+def clean_old_files(app_config, max_age_seconds=3600):
+    """
+    Clean files that are older than the specified age from public images and uploads directory
+    
+    Args:
+        app_config: Flask app configuration
+        max_age_seconds: Maximum age of files in seconds (default: 3600 seconds = 1 hour)
+        
+    Returns:
+        Total number of cleaned items
+    """
+    total_items = 0
+    current_time = time.time()
+    
+    # Clean old files from public images directory
+    public_images_dir = Path(app_config['PUBLIC_IMAGES_DIR_ABS'])
+    if public_images_dir.exists():
+        for item in public_images_dir.glob("*"):
+            try:
+                if item.is_file():
+                    # Get file modification time
+                    file_mtime = item.stat().st_mtime
+                    
+                    # If file is older than max_age_seconds
+                    if current_time - file_mtime > max_age_seconds:
+                        item.unlink()
+                        total_items += 1
+                        logger.info(f"Deleted old file from images: {item.name}")
+            except Exception as e:
+                logger.warning(f"Error removing old image file {item}: {str(e)}")
+    
+    # Clean old files from uploads directory
+    uploads_dir = Path(app_config.get('STATIC_FOLDER', 'static')) / 'uploads'
+    if uploads_dir.exists():
+        for item in uploads_dir.glob("*"):
+            try:
+                if item.is_file():
+                    # Get file modification time
+                    file_mtime = item.stat().st_mtime
+                    
+                    # If file is older than max_age_seconds
+                    if current_time - file_mtime > max_age_seconds:
+                        item.unlink()
+                        total_items += 1
+                        logger.info(f"Deleted old file from uploads: {item.name}")
+            except Exception as e:
+                logger.warning(f"Error removing old upload file {item}: {str(e)}")
+    
+    logger.info(f"Cleaned {total_items} files older than {max_age_seconds/3600:.1f} hours")
     return total_items 

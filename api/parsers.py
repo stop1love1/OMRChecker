@@ -21,9 +21,15 @@ def setup_parsers():
     upload_parser.add_argument('image_files', 
                               location='files',
                               type=FileStorage, 
-                              required=True, 
+                              required=False, 
                               action='append',
                               help='OMR image files (PNG, JPG, JPEG, PDF)')
+    upload_parser.add_argument('file_urls', 
+                              type=str, 
+                              required=False,
+                              location='form',
+                              action='append',
+                              help='URLs to OMR image files (PNG, JPG, JPEG, PDF)')
     upload_parser.add_argument('directory_name', 
                               type=str, 
                               required=True,

@@ -22,7 +22,7 @@ from src.template import Template
 from src.logger import logger
 
 from utils.validators import validate_directory_name, clean_nan_values, force_string_conversion
-from utils.file_handling import transform_result_format, save_to_public_images, clean_all_folders
+from utils.file_handling import transform_result_format, save_to_public_images, clean_all_folders, download_file_from_url, clean_old_files
 from utils.image_processing import process_pdf
 from api.models import setup_models
 from api.parsers import setup_parsers
@@ -41,6 +41,14 @@ def setup_routes(app):
     
     # Set custom JSON encoder to handle NaN and Infinity values
     app.json_encoder = CustomJSONEncoder
+    
+    # Add CORS headers to all responses
+    @app.after_request
+    def add_cors_headers(response):
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+        response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+        return response
     
     # Create API blueprint
     blueprint = Blueprint('api', __name__, url_prefix='/api')
@@ -136,7 +144,6 @@ def setup_routes(app):
                 
                 directory_name = args['directory_name']
                 
-                # Convert string values to boolean if needed
                 clean_before = args['clean_before']
                 if isinstance(clean_before, str):
                     clean_before = clean_before.lower() != 'false'
@@ -150,6 +157,12 @@ def setup_routes(app):
                 is_valid, error_message = validate_directory_name(directory_name)
                 if not is_valid:
                     return {"error": error_message}, 400
+                
+                image_files = args['image_files'] or []
+                file_urls = args['file_urls'] or []
+                
+                if not image_files and not file_urls:
+                    return {'error': 'At least one image file or file URL must be provided'}, 400
                 
                 input_dir = os.path.join(app.config['INPUTS_DIR_ABS'], directory_name)
                 
@@ -183,18 +196,16 @@ def setup_routes(app):
                         return {'error': f'Marker file {marker_file.filename} must be a PNG, JPG, or JPEG file'}, 400
                     
                     if marker_file:
-                        # Save marker file with fixed name regardless of original filename
                         marker_path = os.path.join(input_dir, 'marker.png')
                         marker_file.save(marker_path)
                         
                         if not os.path.exists(marker_path):
                             logger.error(f"Failed to save marker file at {marker_path}")
                     
-                    # Process PDF files in batches
                     pdf_files = []
                     regular_image_files = []
                     
-                    for image_file in args['image_files']:
+                    for image_file in image_files:
                         if image_file.filename.lower().endswith('.pdf'):
                             logger.info(f"Found PDF file: {image_file.filename}")
                             pdf_path = os.path.join(input_dir, image_file.filename)
@@ -205,9 +216,19 @@ def setup_routes(app):
                             image_file.save(image_path)
                             regular_image_files.append(image_path)
                     
+                    for file_url in file_urls:
+                        downloaded_path = download_file_from_url(file_url, input_dir, app.config)
+                        
+                        if downloaded_path:
+                            if downloaded_path.lower().endswith('.pdf'):
+                                pdf_files.append(downloaded_path)
+                            else:
+                                regular_image_files.append(downloaded_path)
+                        else:
+                            logger.warning(f"Failed to download file from URL: {file_url}")
+                    
                     image_paths = regular_image_files.copy()
                     
-                    # Process PDFs in optimized batch mode if there are many files
                     if pdf_files:
                         logger.info(f"Processing {len(pdf_files)} PDF files in batch mode")
                         pdf_start_time = time.time()
@@ -216,7 +237,6 @@ def setup_routes(app):
                             from utils.image_processing import process_pdf_batch
                             from utils.batch_config import get_batch_profile
                             
-                            # Get appropriate batch profile based on number of files
                             batch_profile = get_batch_profile(len(pdf_files))
                             
                             pdf_results = process_pdf_batch(
@@ -226,11 +246,9 @@ def setup_routes(app):
                                 quality=batch_profile["quality"]
                             )
                             
-                            # Collect all generated image paths
                             for pdf_path, paths in pdf_results.items():
                                 image_paths.extend(paths)
                                 
-                                # Remove the original PDF to save space
                                 try:
                                     os.remove(pdf_path)
                                 except Exception as rm_error:
@@ -243,22 +261,19 @@ def setup_routes(app):
                             logger.error(f"Error in batch PDF processing: {str(batch_error)}")
                             logger.info("Falling back to individual PDF processing")
                             
-                            # Use traditional processing as fallback
                             from utils.image_processing import process_pdf
                             
                             for pdf_path in pdf_files:
                                 try:
-                                    # Use optimized PDF processing with much lower DPI and more parallelism
                                     new_image_paths = process_pdf(
                                         pdf_path, 
                                         input_dir,
-                                        dpi=100,  # Lower DPI for speed
-                                        quality=70,  # Lower quality for faster processing
-                                        max_workers=12  # More parallel processing
+                                        dpi=100,
+                                        quality=70,
+                                        max_workers=12
                                     )
                                     image_paths.extend(new_image_paths)
                                     
-                                    # Remove the original PDF to save space
                                     try:
                                         os.remove(pdf_path)
                                     except Exception as rm_error:
@@ -266,8 +281,10 @@ def setup_routes(app):
                                     
                                 except Exception as pdf_error:
                                     logger.error(f"Error processing PDF file {pdf_path}: {str(pdf_error)}")
+                    
+                    if not image_paths:
+                        return {'error': 'No valid images to process'}, 400
                                     
-                    # Setup arguments for OMR processing with optimized performance settings
                     api_args = {
                         'input_paths': [input_dir],
                         'output_dir': app.config['OUTPUTS_DIR_ABS'],
@@ -276,31 +293,25 @@ def setup_routes(app):
                         'debug': True,
                     }
                     
-                    # Use optimized tuning configuration for faster processing
                     tuning_config = CONFIG_DEFAULTS
                     
-                    # Apply batch-appropriate settings if we had PDF files
                     if pdf_files:
                         from utils.batch_config import get_batch_profile
                         batch_profile = get_batch_profile(len(pdf_files))
                         
-                        # Set optimized processing parameters based on batch size
                         tuning_config.dimensions.processing_width = batch_profile["processing_width"]
                         tuning_config.outputs.save_image_level = batch_profile["save_image_level"]
                         tuning_config.outputs.show_image_level = batch_profile["show_image_level"]
                     else:
-                        # Default settings for non-PDF processing
                         tuning_config.dimensions.processing_width = 800
                         tuning_config.outputs.save_image_level = 0
                         tuning_config.outputs.show_image_level = 0
                     
                     template = Template(Path(template_path), tuning_config)
                     
-                    # Use Path objects consistently for process_dir
                     root_dir = Path(app.config['INPUTS_DIR_ABS'])
                     curr_dir = Path(input_dir)
                     
-                    # Measure OMR processing time
                     omr_start_time = time.time()
                     
                     results = process_dir(
@@ -313,21 +324,16 @@ def setup_routes(app):
                     
                     output_dir_path = Path(output_dir)
                     
-                    # Find CSV result file with fallback options
                     all_csv_files = list(output_dir_path.glob('**/*.csv'))
                     
-                    # Look in CheckedOMRs directory first
                     results_file = list(output_dir_path.glob('**/CheckedOMRs/*.csv'))
                     
-                    # Then look in Results folder
                     if not results_file:
                         results_file = list(output_dir_path.glob('**/Results/*.csv'))
                     
-                    # Try Results_*.csv anywhere
                     if not results_file:
                         results_file = list(output_dir_path.glob('**/Results_*.csv'))
                     
-                    # Last resort: any CSV except ErrorFiles.csv
                     if not results_file:
                         non_error_csv = [f for f in all_csv_files if 'ErrorFiles.csv' not in str(f)]
                         if non_error_csv:
@@ -340,24 +346,19 @@ def setup_routes(app):
                     
                     csv_file_path = results_file[0]
                     
-                    # Read CSV with studentId and code always as strings
                     df = pd.read_csv(csv_file_path, dtype={'studentId': str, 'code': str})
                     
-                    # Apply additional string conversion to ensure leading zeros are preserved
                     df = force_string_conversion(df, ['studentId', 'code'])
                     
-                    # Replace NaN and infinite values
                     df = df.replace([np.inf, -np.inf], 'Infinity')
                     df = df.fillna("")
                     
                     results_data = df.to_dict(orient='records')
                     
-                    # Create unique ID for this result set
                     result_id = str(uuid.uuid4())
                     result_dir = Path(app.config['PROCESSED_DIR']) / result_id
                     os.makedirs(result_dir, exist_ok=True)
                     
-                    # Copy result files to persistent directory
                     for file in output_dir_path.glob('**/*'):
                         if file.is_file():
                             try:
@@ -368,13 +369,11 @@ def setup_routes(app):
                             except Exception as copy_error:
                                 logger.warning(f"Error copying file {file}: {str(copy_error)}")
                     
-                    # Process results and save public images
                     clean_results = []
                     for result in results_data:
                         clean_result = clean_nan_values(result)
                         transformed_result = transform_result_format(clean_result)
                         
-                        # Find input and output image paths
                         input_image_path = None
                         output_image_path = None
                         
@@ -390,7 +389,6 @@ def setup_routes(app):
                         if 'output_path' in clean_result:
                             output_image_path = clean_result['output_path']
                         
-                        # Save images to public directory and add URLs to result
                         public_input_image = None
                         public_output_image = None
                         
@@ -416,7 +414,6 @@ def setup_routes(app):
                         
                         clean_results.append(transformed_result)
                     
-                    # Calculate total processing time
                     end_time = time.time()
                     total_processing_time = end_time - omr_start_time
                     logger.info(f"Total processing completed in {total_processing_time:.2f} seconds")
@@ -433,7 +430,6 @@ def setup_routes(app):
                         'results': clean_results
                     }
                     
-                    # Clean directories if requested
                     if clean_after:
                         try:
                             if os.path.exists(input_dir):
@@ -466,7 +462,6 @@ def setup_routes(app):
             
             directory_name = args['directory_name']
             
-            # Convert string values to boolean if needed
             clean_before = args['clean_before']
             if isinstance(clean_before, str):
                 clean_before = clean_before.lower() != 'false'
@@ -532,7 +527,6 @@ def setup_routes(app):
             if not result_dir.exists():
                 return {'error': 'Result not found'}, 404
             
-            # Find CSV result file with multiple fallback options
             csv_files = list(result_dir.glob('**/CheckedOMRs/*.csv'))
             
             if not csv_files:
@@ -552,13 +546,10 @@ def setup_routes(app):
             if not csv_files:
                 return {'error': 'No results found'}, 404
             
-            # Read CSV with studentId and code always as strings
             df = pd.read_csv(csv_files[0], dtype={'studentId': str, 'code': str})
             
-            # Apply additional string conversion to ensure leading zeros are preserved
             df = force_string_conversion(df, ['studentId', 'code'])
             
-            # Replace NaN and infinite values
             df = df.replace([np.inf, -np.inf], 'Infinity')
             df = df.fillna("")
             
@@ -587,7 +578,6 @@ def setup_routes(app):
                 })
         def get(self, result_id, filename):
             """Download a file from the results"""
-            # Security check for path traversal
             if '..' in filename or filename.startswith('/'):
                 return {'error': 'Invalid filename'}, 400
                 
@@ -596,7 +586,6 @@ def setup_routes(app):
             if not result_dir.exists():
                 return {'error': 'Result not found'}, 404
             
-            # Special handling for Results_11AM.csv
             if filename.lower() == 'results_11am.csv' or filename.lower() == 'results.csv':
                 results_file = list(result_dir.glob('**/Results_11AM.csv'))
                 if results_file:
@@ -612,7 +601,6 @@ def setup_routes(app):
             if not file_path.exists() or not file_path.is_file():
                 return {'error': 'File not found'}, 404
             
-            # Additional security check for path traversal
             try:
                 if not str(file_path.resolve()).startswith(str(result_dir.resolve())):
                     return {'error': 'Invalid file path'}, 403
@@ -673,13 +661,11 @@ def setup_routes(app):
                 if not file or file.filename == '':
                     return {'error': 'No file selected'}, 400
                 
-                # Save file directly
                 filename = secure_filename(file.filename)
                 unique_filename = f"{uuid.uuid4().hex}_{filename}"
                 file_path = os.path.join(uploads_dir, unique_filename)
                 file.save(file_path)
                 
-                # Create URL
                 file_url = url_for('serve_uploaded_file', filename=unique_filename, _external=True)
                 
                 return {
@@ -692,5 +678,23 @@ def setup_routes(app):
                 logger.error(f"Error uploading file: {str(e)}")
                 return {'error': str(e)}, 500
 
-    # Return API instance for reference
+    @ns.route('/clean-old-files')
+    class CleanOldFiles(Resource):
+        @ns.doc('clean_old_files',
+                responses={
+                    200: 'Cleaned successfully',
+                    500: 'Cleaning error'
+                })
+        def post(self):
+            """Delete files older than 1 hour from images and uploads directories"""
+            try:
+                total_items = clean_old_files(app.config)
+                return {
+                    'status': 'success',
+                    'message': f'Deleted {total_items} files older than 1 hour'
+                }, 200
+            except Exception as e:
+                logger.error(f"Error during manual cleaning of old files: {str(e)}")
+                return {'error': f'Error cleaning old files: {str(e)}'}, 500
+
     return api 
