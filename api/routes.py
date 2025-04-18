@@ -11,9 +11,10 @@ import time
 from pathlib import Path
 import pandas as pd
 
-from flask import send_file, send_from_directory, Blueprint
+from flask import send_file, send_from_directory, Blueprint, url_for, request
 from flask_restx import Api, Resource
 from flask_swagger_ui import get_swaggerui_blueprint
+from werkzeug.utils import secure_filename
 
 from src.entry import process_dir
 from src.defaults import CONFIG_DEFAULTS
@@ -89,6 +90,10 @@ def setup_routes(app):
     models = setup_models(api)
     parsers = setup_parsers()
     
+    # Ensure uploads directory exists
+    uploads_dir = os.path.join(app.static_folder, 'uploads')
+    os.makedirs(uploads_dir, exist_ok=True)
+    
     # Define routes
     @app.route('/')
     def index():
@@ -97,6 +102,10 @@ def setup_routes(app):
     @app.route('/static/<path:path>')
     def send_static(path):
         return send_from_directory('static', path)
+    
+    @app.route('/static/uploads/<path:filename>')
+    def serve_uploaded_file(filename):
+        return send_from_directory(os.path.join(app.static_folder, 'uploads'), filename)
     
     @app.route('/images/<filename>')
     def serve_public_image(filename):
@@ -644,6 +653,44 @@ def setup_routes(app):
             except Exception as e:
                 logger.error(f"Error during manual cleaning: {str(e)}")
                 return {'error': f'Error cleaning directories: {str(e)}'}, 500
+
+    @ns.route('/upload-file')
+    @ns.expect(parsers['single_file_parser'])
+    class UploadSingleFile(Resource):
+        @ns.doc('upload_single_file',
+                responses={
+                    200: 'Success',
+                    400: 'Bad Request',
+                    413: 'Entity Too Large',
+                    500: 'Error'
+                })
+        def post(self):
+            """Upload a single file and return its URL"""
+            try:
+                args = parsers['single_file_parser'].parse_args()
+                file = args['file']
+                
+                if not file or file.filename == '':
+                    return {'error': 'No file selected'}, 400
+                
+                # Save file directly
+                filename = secure_filename(file.filename)
+                unique_filename = f"{uuid.uuid4().hex}_{filename}"
+                file_path = os.path.join(uploads_dir, unique_filename)
+                file.save(file_path)
+                
+                # Create URL
+                file_url = url_for('serve_uploaded_file', filename=unique_filename, _external=True)
+                
+                return {
+                    'filename': filename,
+                    'url': file_url,
+                    'size': os.path.getsize(file_path)
+                }, 200
+                
+            except Exception as e:
+                logger.error(f"Error uploading file: {str(e)}")
+                return {'error': str(e)}, 500
 
     # Return API instance for reference
     return api 

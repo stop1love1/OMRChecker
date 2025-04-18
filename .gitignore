@@ -9,6 +9,8 @@ outputs/*
 
 images/*
 
+static/uploads/*
+
 # Misc
 **/.DS_Store
 **/__pycache__

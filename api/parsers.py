@@ -55,7 +55,26 @@ def setup_parsers():
                               default=False,
                               help='Clean directories after processing and saving results')
     
+    # Files upload parser for generic file uploads
+    files_upload_parser = reqparse.RequestParser()
+    files_upload_parser.add_argument('files',
+                              location='files',
+                              type=FileStorage,
+                              required=True,
+                              action='append',
+                              help='Files to upload')
+    
+    # Single file upload parser - simpler version
+    single_file_parser = reqparse.RequestParser()
+    single_file_parser.add_argument('file',
+                              location='files',
+                              type=FileStorage,
+                              required=True,
+                              help='Single file to upload')
+    
     return {
         'upload_parser': upload_parser,
-        'get_params_parser': get_params_parser
+        'get_params_parser': get_params_parser,
+        'files_upload_parser': files_upload_parser,
+        'single_file_parser': single_file_parser
     } 

@@ -21,7 +21,7 @@ def create_app():
     app.config['INPUTS_DIR'] = 'inputs'
     app.config['OUTPUTS_DIR'] = 'outputs'
     app.config['PUBLIC_IMAGES_DIR'] = 'images'
-    app.config['MAX_CONTENT_LENGTH'] = 1000 * 1024 * 1024  # 1000 MB max upload
+    app.config['MAX_CONTENT_LENGTH'] = 2000 * 1024 * 1024  # 2000 MB (2GB) max upload
 
     # Create directories if they don't exist
     os.makedirs(app.config['PROCESSED_DIR'], exist_ok=True)
