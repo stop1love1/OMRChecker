@@ -906,24 +906,18 @@ def setup_routes(app):
                     return {'error': 'No valid files to process'}, 400
                 
                 # Organize files into subfolders
-                from utils.image_processing import organize_files_into_subfolders, process_subfolder_batches
+                from utils.image_processing import organize_files_into_subfolders, process_subfolder_batches, speed_optimized_batch_processor
                 
                 batch_start_time = time.time()
                 
-                # Step 1: Organize files
-                subfolder_map = organize_files_into_subfolders(valid_files, base_input_dir, files_per_folder=batch_size)
-                
-                # Copy template and marker to each subfolder
-                for subfolder_path in subfolder_map.keys():
-                    # Copy template file
-                    shutil.copy2(template_path, os.path.join(subfolder_path, 'template.json'))
-                    
-                    # Copy marker file if it exists
-                    if marker_file and os.path.exists(marker_path):
-                        shutil.copy2(marker_path, os.path.join(subfolder_path, 'marker.png'))
-                
-                # Step 2: Process each subfolder and merge results
-                processing_results = process_subfolder_batches(subfolder_map, base_output_dir)
+                # Xử lý nhanh với song song
+                processing_results = speed_optimized_batch_processor(
+                    valid_files, 
+                    base_input_dir, 
+                    base_output_dir,
+                    files_per_folder=batch_size,
+                    max_workers=min(os.cpu_count(), 4)  # Giới hạn 4 luồng
+                )
                 
                 # Build response data
                 merged_dir = processing_results.get('merged_dir', '')

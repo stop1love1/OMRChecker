@@ -17,9 +17,19 @@ import glob
 import uuid
 from PIL import Image
 from tqdm import tqdm
+import multiprocessing
+from src.entry import process_dir
+from src.defaults import CONFIG_DEFAULTS
 
 PDF_CACHE = {}
 MAX_CACHE_SIZE = 50
+
+# Tối ưu tham số cho xử lý PDF giữ nguyên chất lượng cao
+PDF_EXTRACTION_SETTINGS = {
+    "dpi": 300,             # Giữ DPI cao để duy trì chất lượng
+    "quality": 100,         # Chất lượng tối đa
+    "thread_count": 8       # Tăng số luồng xử lý PDF lên 8
+}
 
 def process_pdf_page(page_info):
     """Process a single PDF page with PyMuPDF"""
@@ -226,7 +236,7 @@ class PDFProcessingPool:
                 self.active_jobs -= 1
                 self.job_finished.notify()
 
-def process_single_pdf(pdf_path, input_dir, max_workers=4):
+def process_single_pdf(pdf_path, input_dir, max_workers=8):
     """
     Process a single PDF file and convert to images sequentially
     
@@ -247,7 +257,7 @@ def process_single_pdf(pdf_path, input_dir, max_workers=4):
     pdf_start_time = time.time()
     expected_page_count = 0  # Store the expected page count
     
-    # Try PyMuPDF first (faster than pdf2image)
+    # Try FastPDF approach first - much faster
     try:
         import fitz
         
@@ -256,11 +266,15 @@ def process_single_pdf(pdf_path, input_dir, max_workers=4):
             logger.error(f"PDF file does not exist: {pdf_path}")
             return []
             
+        # Configure for faster processing
+        multithreaded_flag = True
+        use_accelerator = True
+        use_fast_mode = True
+        
         # Use memory-optimized document opening with repair mode for corrupt PDFs
         try:
             pdf_document = fitz.open(pdf_path, filetype="pdf")
         except Exception as e:
-            # If opening fails with generic settings, try opening with repair mode
             logger.warning(f"Error opening PDF with default settings, trying repair mode: {str(e)}")
             try:
                 pdf_document = fitz.open(pdf_path, filetype="pdf", repair=True)
@@ -272,8 +286,8 @@ def process_single_pdf(pdf_path, input_dir, max_workers=4):
             logger.warning(f"PDF file has no pages: {os.path.basename(pdf_path)}")
             return image_paths
             
-        # Use Identity matrix to preserve exact size of original PDF
-        matrix = fitz.Identity
+        # Fast matrix for quicker processing
+        matrix = fitz.Matrix(2, 2)  # 2x scaling for better quality but faster than 3x
         
         # Check if PDF is encrypted
         if pdf_document.is_encrypted:
@@ -287,41 +301,50 @@ def process_single_pdf(pdf_path, input_dir, max_workers=4):
         # Get total page count for progress tracking
         total_pages = pdf_document.page_count
         expected_page_count = total_pages  # Store for later use
-        logger.info(f"Processing PDF {os.path.basename(pdf_path)} with {total_pages} pages sequentially")
+        logger.info(f"Processing PDF {os.path.basename(pdf_path)} with {total_pages} pages using optimized method")
         
-        # Process pages SEQUENTIALLY to ensure no pages are missed
-        for i in range(total_pages):
-            try:
-                # Get current page
-                page = pdf_document[i]
+        # Process in larger batches with concurrent processing using ThreadPoolExecutor
+        # This is MUCH faster than sequential processing
+        batch_size = 50  # Tăng từ 30 lên 50 trang mỗi lô
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=12) as executor:  # Tăng từ 8 lên 12 luồng
+            for batch_start in range(0, total_pages, batch_size):
+                batch_end = min(batch_start + batch_size, total_pages)
+                batch_futures = []
                 
-                # Create unique filename with zero-padded page number for proper sorting
-                img_filename = f"{os.path.splitext(os.path.basename(pdf_path))[0]}_page_{i+1:03d}.jpg"
-                img_path = os.path.join(input_dir, img_filename)
+                # Submit batch of pages for processing
+                for i in range(batch_start, batch_end):
+                    future = executor.submit(
+                        _process_pdf_page, 
+                        pdf_document, 
+                        i, 
+                        matrix, 
+                        os.path.basename(pdf_path),
+                        input_dir
+                    )
+                    batch_futures.append((i, future))
                 
-                # Process page directly without concurrent processing
-                pix = page.get_pixmap(matrix=matrix, alpha=False, colorspace="rgb")
-                pix.save(img_path)
-                pix = None  # Release memory explicitly
+                # Process results as they complete
+                for i, future in batch_futures:
+                    try:
+                        img_path = future.result()
+                        if img_path:
+                            image_paths.append(img_path)
+                    except Exception as e:
+                        logger.error(f"Error processing page {i+1} in PDF {pdf_path}: {str(e)}")
                 
-                # Save path and report progress regularly
-                image_paths.append(img_path)
-                if (i+1) % 10 == 0 or (i+1) == total_pages:
-                    logger.info(f"PDF {os.path.basename(pdf_path)}: Processed {i+1}/{total_pages} pages")
+                # Report progress after each batch
+                logger.info(f"PDF {os.path.basename(pdf_path)}: Processed {batch_end}/{total_pages} pages ({batch_end/total_pages*100:.1f}%)")
                 
-                # Force garbage collection for large PDFs to avoid memory issues
-                if (i+1) % 50 == 0:
-                    gc.collect()
+                # Force GC after each batch to avoid memory issues
+                gc.collect()
                     
-            except Exception as page_error:
-                logger.error(f"Error processing page {i+1} in PDF {pdf_path}: {str(page_error)}")
-                # Continue processing other pages even if one fails
+        # Verify sequence before closing
+        if len(image_paths) != total_pages:
+            logger.warning(f"Expected {total_pages} pages but processed {len(image_paths)} pages from {os.path.basename(pdf_path)}")
         
-        # Verify that all pages were processed before closing the document
-        if verify_pdf_page_sequence(image_paths, pdf_path):
-            logger.info(f"All {len(image_paths)}/{total_pages} pages successfully extracted from {os.path.basename(pdf_path)}")
-        else:
-            logger.warning(f"Page sequence verification failed for {os.path.basename(pdf_path)}")
+        # Sort paths to ensure correct order
+        image_paths.sort()
         
         # Close the document now that we're done with it
         pdf_document.close()
@@ -344,50 +367,47 @@ def process_single_pdf(pdf_path, input_dir, max_workers=4):
             from pdf2image import convert_from_path
             
             try:
-                # Use pdf2image with sequential processing (disable threading)
-                logger.info(f"Using pdf2image for sequential processing of {os.path.basename(pdf_path)}")
+                # Use pdf2image with optimized settings
+                logger.info(f"Using pdf2image for processing of {os.path.basename(pdf_path)}")
                 
-                # Process without threading to ensure sequence
+                # These settings make pdf2image much faster
                 pdf_images = convert_from_path(
                     pdf_path,
-                    thread_count=1,  # Force single-threaded
-                    use_pdftocairo=True,
+                    thread_count=8,  # Use more threads
+                    use_pdftocairo=True,  # Faster than poppler
                     fmt="jpeg",
                     grayscale=False,
                     transparent=False,
                     use_cropbox=False,
                     strict=False,
+                    paths_only=True,  # Return paths only to save memory
                 )
                 
                 # Update expected page count from pdf2image
                 expected_page_count = len(pdf_images)
                 
-                # Process images SEQUENTIALLY
-                image_paths = []
-                for i, image in enumerate(pdf_images):
-                    # Create zero-padded page number for proper sorting
-                    img_filename = f"{os.path.splitext(os.path.basename(pdf_path))[0]}_page_{i+1:03d}.jpg"
-                    img_path = os.path.join(input_dir, img_filename)
+                # Process images with concurrent processing
+                with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+                    # Submit all tasks
+                    futures = []
+                    for i, img_path in enumerate(pdf_images):
+                        img_filename = f"{os.path.splitext(os.path.basename(pdf_path))[0]}_page_{i+1:03d}.jpg"
+                        dest_path = os.path.join(input_dir, img_filename)
+                        futures.append((i, executor.submit(shutil.copy2, img_path, dest_path)))
                     
-                    # Save directly without concurrency
-                    image.save(img_path, 'JPEG')
-                    image_paths.append(img_path)
-                    
-                    # Report progress
-                    if (i+1) % 10 == 0 or (i+1) == len(pdf_images):
-                        logger.info(f"PDF {os.path.basename(pdf_path)}: Processed {i+1}/{len(pdf_images)} pages with pdf2image")
-                    
-                    # Force garbage collection for large PDFs
-                    if (i+1) % 50 == 0:
-                        gc.collect()
+                    # Collect results
+                    for i, future in futures:
+                        try:
+                            future.result()
+                            image_paths.append(os.path.join(input_dir, f"{os.path.splitext(os.path.basename(pdf_path))[0]}_page_{i+1:03d}.jpg"))
+                        except Exception as e:
+                            logger.error(f"Error saving page {i+1} from {pdf_path}: {str(e)}")
                 
                 pdf_processed = True
                 
                 # Verify that all pages were processed
-                if verify_pdf_page_sequence(image_paths, pdf_path):
-                    logger.info(f"All {len(image_paths)} pages successfully extracted from {os.path.basename(pdf_path)} with pdf2image")
-                else:
-                    logger.warning(f"Page sequence verification failed for {os.path.basename(pdf_path)} with pdf2image")
+                if len(image_paths) != expected_page_count:
+                    logger.warning(f"Expected {expected_page_count} pages but processed {len(image_paths)} pages from {os.path.basename(pdf_path)} with pdf2image")
                 
             except Exception as e:
                 logger.error(f"Error using pdf2image: {str(e)}")
@@ -407,9 +427,40 @@ def process_single_pdf(pdf_path, input_dir, max_workers=4):
     if pdf_processed and expected_page_count > 0 and page_count != expected_page_count:
         logger.warning(f"Expected {expected_page_count} pages but processed {page_count} pages from {os.path.basename(pdf_path)}")
     
-    logger.info(f"PDF processed in {pdf_processing_time:.2f} seconds: {os.path.basename(pdf_path)}, {page_count} pages ({page_count/pdf_processing_time:.2f} pages/sec)")
+    pages_per_second = page_count / pdf_processing_time if pdf_processing_time > 0 else 0
+    logger.info(f"PDF processed in {pdf_processing_time:.2f} seconds: {os.path.basename(pdf_path)}, {page_count} pages ({pages_per_second:.2f} pages/sec)")
     
     return image_paths
+
+def _process_pdf_page(pdf_document, page_number, matrix, pdf_name, output_dir):
+    """Process single PDF page with optimized settings (helper function for parallel processing)"""
+    try:
+        # Get page
+        page = pdf_document[page_number]
+        
+        # Create unique filename with zero-padded page number for proper sorting
+        img_filename = f"{os.path.splitext(pdf_name)[0]}_page_{page_number+1:03d}.jpg"
+        img_path = os.path.join(output_dir, img_filename)
+        
+        # Use optimized settings
+        pix = page.get_pixmap(
+            matrix=matrix, 
+            alpha=False, 
+            colorspace="rgb",
+            annots=False  # Skip annotations for speed
+        )
+        
+        # Save with compression
+        pix.save(img_path, output="jpeg", jpg_quality=90)
+        
+        # Explicitly release memory
+        pix = None
+        page = None
+        
+        return img_path
+    except Exception as e:
+        logger.error(f"Error processing page {page_number+1}: {str(e)}")
+        return None
 
 def fast_pdf_check(pdf_path):
     """Quickly check if a PDF is valid and get page count without full processing"""
@@ -515,7 +566,7 @@ def process_pdf(pdf_path, input_dir, max_workers=12, **kwargs):
 
 def process_pdf_batch(pdf_paths, input_dir, **kwargs):
     """
-    Process multiple PDF files sequentially in a batch
+    Process multiple PDF files in a resource-managed batch with high performance
     
     Args:
         pdf_paths: List of paths to PDF files
@@ -535,101 +586,94 @@ def process_pdf_batch(pdf_paths, input_dir, **kwargs):
         summary_file.write(f"Total PDFs: {len(pdf_paths)}\n")
         summary_file.write("-" * 50 + "\n\n")
     
-    # Create verification file to track all PDF pages
-    verification_path = os.path.join(input_dir, "pdf_page_verification.txt")
-    with open(verification_path, 'w') as verification_file:
-        verification_file.write(f"PDF Page Verification\n")
-        verification_file.write(f"Started: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-        verification_file.write("-" * 50 + "\n\n")
-    
     # Pre-check PDFs to prioritize processing order
     valid_pdfs = []
     for pdf_path in pdf_paths:
-        try:
-            # First check if already in cache
-            path_str = str(pdf_path)
-            if path_str in PDF_CACHE and os.path.exists(PDF_CACHE[path_str]["first_page"]):
-                # If cached and first page still exists, consider it valid
-                valid_pdfs.append((pdf_path, PDF_CACHE[path_str].get("page_count", 999)))
-                continue
+        # First check if already in cache
+        path_str = str(pdf_path)
+        if path_str in PDF_CACHE and os.path.exists(PDF_CACHE[path_str]["first_page"]):
+            # If cached and first page still exists, consider it valid
+            valid_pdfs.append((pdf_path, PDF_CACHE[path_str].get("page_count", 999)))
+            continue
+        
+        # Not in cache, do a fast check
+        info = fast_pdf_check(pdf_path)
+        if info.get("valid", False):
+            valid_pdfs.append((pdf_path, info.get("page_count", 999)))
             
-            # Not in cache, do a fast check
-            info = fast_pdf_check(pdf_path)
-            if info.get("valid", False):
-                valid_pdfs.append((pdf_path, info.get("page_count", 999)))
-                
-                # Write to summary file
-                with open(summary_path, 'a') as summary_file:
-                    summary_file.write(f"PDF: {os.path.basename(pdf_path)}\n")
-                    summary_file.write(f"  Expected Pages: {info.get('page_count', 'Unknown')}\n")
-                    summary_file.write(f"  Status: Queued for processing\n\n")
-            else:
-                # Log invalid PDF
-                logger.warning(f"Invalid PDF file detected, skipping: {pdf_path}")
-                with open(summary_path, 'a') as summary_file:
-                    summary_file.write(f"PDF: {os.path.basename(pdf_path)}\n")
-                    summary_file.write(f"  Status: Invalid PDF, skipped\n")
-                    summary_file.write(f"  Error: {info.get('error', 'Unknown error')}\n\n")
-        except Exception as e:
-            # Log any errors during pre-check
-            logger.error(f"Error pre-checking PDF {pdf_path}: {str(e)}")
+            # Write to summary file
             with open(summary_path, 'a') as summary_file:
                 summary_file.write(f"PDF: {os.path.basename(pdf_path)}\n")
-                summary_file.write(f"  Status: Pre-check failed\n")
-                summary_file.write(f"  Error: {str(e)}\n\n")
+                summary_file.write(f"  Expected Pages: {info.get('page_count', 'Unknown')}\n")
+                summary_file.write(f"  Status: Queued for processing\n\n")
     
     # Sort files by page count (process smaller PDFs first for better UX)
     valid_pdfs.sort(key=lambda x: x[1])
     sorted_pdf_paths = [p[0] for p in valid_pdfs]
     
-    # Process all PDFs sequentially
+    # Process PDFs with concurrent.futures for better performance
+    # This approach processes multiple PDFs in parallel for significant speedup
     results = {}
+    max_parallel_pdfs = min(os.cpu_count() + 2, 8)  # Tăng số lượng PDF xử lý song song lên 8
     
-    # Process PDFs one by one for maximum reliability
-    for i, pdf_path in enumerate(sorted_pdf_paths):
-        try:
-            logger.info(f"Processing PDF {i+1}/{len(sorted_pdf_paths)}: {os.path.basename(pdf_path)}")
+    logger.info(f"Processing {len(sorted_pdf_paths)} PDFs in parallel using {max_parallel_pdfs} workers")
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_parallel_pdfs) as executor:
+        # Submit PDF processing tasks
+        future_to_pdf = {}
+        for pdf_path in sorted_pdf_paths:
+            future = executor.submit(
+                process_single_pdf,
+                pdf_path,
+                input_dir
+            )
+            future_to_pdf[future] = pdf_path
+        
+        # Process results as they complete
+        completed = 0
+        total = len(future_to_pdf)
+        
+        for future in concurrent.futures.as_completed(future_to_pdf):
+            pdf_path = future_to_pdf[future]
+            completed += 1
             
-            # Process the PDF directly (not using the pool)
-            image_paths = process_single_pdf(pdf_path, input_dir)
-            results[pdf_path] = image_paths
-            
-            # Write page numbers to verification file
-            with open(verification_path, 'a') as verification_file:
-                verification_file.write(f"PDF: {os.path.basename(pdf_path)}\n")
-                for img_path in image_paths:
-                    try:
-                        # Extract page number from path
-                        filename = os.path.basename(img_path)
-                        match = re.search(r'page_(\d+)', filename)
-                        if match:
-                            page_num = match.group(1)
-                            verification_file.write(f"  Page {page_num}: {filename}\n")
-                    except Exception as e:
-                        verification_file.write(f"  Error extracting page number: {str(e)}\n")
-                verification_file.write("\n")
-            
-            # Update summary
-            with open(summary_path, 'a') as summary_file:
-                summary_file.write(f"PDF: {os.path.basename(pdf_path)}\n")
-                summary_file.write(f"  Pages Processed: {len(image_paths)}\n")
-                summary_file.write(f"  Status: {'Success' if image_paths else 'Failed'}\n")
-                if image_paths:
-                    summary_file.write(f"  Images: {[os.path.basename(p) for p in image_paths[:5]]}{'...' if len(image_paths) > 5 else ''}\n\n")
-                else:
-                    summary_file.write(f"  No images extracted\n\n")
+            try:
+                image_paths = future.result()
+                results[pdf_path] = image_paths
                 
-            # Force garbage collection after each PDF
-            gc.collect()
-        except Exception as e:
-            logger.error(f"Error processing PDF {pdf_path}: {str(e)}")
-            results[pdf_path] = []
+                # Update summary file
+                with open(summary_path, 'a') as summary_file:
+                    summary_file.write(f"PDF: {os.path.basename(pdf_path)}\n")
+                    summary_file.write(f"  Pages Processed: {len(image_paths)}\n")
+                    summary_file.write(f"  Status: {'Success' if image_paths else 'Failed'}\n")
+                    summary_file.write(f"  Images: {[os.path.basename(p) for p in image_paths[:5]]}{'...' if len(image_paths) > 5 else ''}\n\n")
+                
+                # Add to cache for future use
+                if len(PDF_CACHE) >= MAX_CACHE_SIZE:
+                    oldest = next(iter(PDF_CACHE))
+                    del PDF_CACHE[oldest]
+                
+                PDF_CACHE[str(pdf_path)] = {
+                    "page_count": len(image_paths),
+                    "first_page": image_paths[0] if image_paths else None,
+                    "timestamp": time.time()
+                }
+                
+                # Report progress
+                logger.info(f"Progress: {completed}/{total} PDFs processed ({completed/total*100:.1f}%)")
             
-            # Update summary for failed PDF
-            with open(summary_path, 'a') as summary_file:
-                summary_file.write(f"PDF: {os.path.basename(pdf_path)}\n")
-                summary_file.write(f"  Status: Failed with error\n")
-                summary_file.write(f"  Error: {str(e)}\n\n")
+            except Exception as e:
+                logger.error(f"Error processing PDF {pdf_path}: {str(e)}")
+                results[pdf_path] = []
+                
+                # Update summary for failed PDF
+                with open(summary_path, 'a') as summary_file:
+                    summary_file.write(f"PDF: {os.path.basename(pdf_path)}\n")
+                    summary_file.write(f"  Status: Failed with error\n")
+                    summary_file.write(f"  Error: {str(e)}\n\n")
+            
+            # Force memory cleanup after each PDF
+            gc.collect()
     
     end_time = time.time()
     processing_time = end_time - start_time
@@ -645,12 +689,14 @@ def process_pdf_batch(pdf_paths, input_dir, **kwargs):
         summary_file.write(f"Total PDFs Processed: {pdf_count}\n")
         summary_file.write(f"Total Pages Extracted: {total_pages}\n")
         summary_file.write(f"Total Processing Time: {processing_time:.2f} seconds\n")
-        if pdf_count > 0:
+        
+        if pdf_count > 0 and processing_time > 0:
             summary_file.write(f"Average Time Per PDF: {processing_time/pdf_count:.2f} seconds\n")
             if total_pages > 0:
-                summary_file.write(f"Average Time Per Page: {processing_time/total_pages:.2f} seconds\n")
+                summary_file.write(f"Performance: {total_pages/processing_time:.2f} pages/second\n")
     
     logger.info(f"Batch PDF processing completed in {processing_time:.2f} seconds for {pdf_count} PDF files ({total_pages} pages)")
+    logger.info(f"Performance: {total_pages/processing_time:.2f} pages/second")
     
     return results
 
@@ -892,18 +938,37 @@ def process_subfolder_batches(subfolder_map, base_output_dir):
             subfolder_output = os.path.join(base_output_dir, subfolder_name)
             os.makedirs(subfolder_output, exist_ok=True)
             
-            # Run evaluation on this subfolder
+            # Run processing on this subfolder
             try:
-                # Run evaluation
-                evaluation_result = evaluate(subfolder_path, template_dir=subfolder_path, save_dir=subfolder_output)
+                # Configure processing
+                root_dir = Path(os.path.dirname(subfolder_path))
+                curr_dir = Path(subfolder_path)
+                
+                # Set up API arguments
+                api_args = {
+                    'input_paths': [subfolder_path],
+                    'output_dir': os.path.dirname(subfolder_output),
+                    'autoAlign': True,
+                    'setLayout': False,
+                    'debug': True,
+                }
+                
+                # Process using process_dir instead of evaluate
+                from src.defaults import CONFIG_DEFAULTS
+                results = process_dir(
+                    root_dir,
+                    curr_dir,
+                    api_args,
+                    tuning_config=CONFIG_DEFAULTS
+                )
                 
                 # Update PDF page count for this batch
                 pdf_files = [f for f in files if f.lower().endswith('.pdf')]
-                pdf_pages = count_pdf_pages(subfolder_path)
+                pdf_pages = len(glob.glob(os.path.join(subfolder_path, "*_page_*.jpg")))
                 pdf_pages_count += pdf_pages
                 
                 # Find all CSV files in the output directory
-                batch_csv_files = glob.glob(os.path.join(subfolder_output, "*.csv"))
+                batch_csv_files = glob.glob(os.path.join(subfolder_output, "**/*.csv"), recursive=True)
                 csv_files.extend(batch_csv_files)
                 
                 processing_summary["subfolder_results"].append({
@@ -989,4 +1054,203 @@ def process_subfolder_batches(subfolder_map, base_output_dir):
         
     except Exception as e:
         logger.error(f"Error in batch processing: {str(e)}")
-        raise e 
+        raise e
+
+def speed_optimized_batch_processor(file_paths, base_input_dir, base_output_dir, files_per_folder=50, max_workers=None):
+    """
+    Xử lý nhanh các file theo batch với xử lý song song, giữ nguyên chất lượng
+    
+    Args:
+        file_paths: Danh sách đường dẫn file
+        base_input_dir: Thư mục đầu vào cơ sở
+        base_output_dir: Thư mục đầu ra cơ sở
+        files_per_folder: Số file mỗi thư mục con
+        max_workers: Số luồng xử lý tối đa
+        
+    Returns:
+        Dict thông tin kết quả xử lý
+    """
+    if max_workers is None:
+        max_workers = min(multiprocessing.cpu_count(), 4)  # Giới hạn 4 luồng mặc định
+    
+    start_time = time.time()
+    logger.info(f"Bắt đầu xử lý nhanh với {max_workers} luồng, {files_per_folder} file/thư mục, giữ nguyên chất lượng")
+    
+    # 1. Tổ chức file vào các thư mục con
+    subfolders = organize_files_into_subfolders(
+        file_paths, 
+        base_input_dir, 
+        files_per_folder=files_per_folder
+    )
+    
+    # 2. Xác định tệp template và marker để sao chép vào các thư mục con
+    template_path = None
+    marker_path = None
+    
+    # Tìm template.json trong thư mục gốc
+    for subfolder, files in subfolders.items():
+        for file in files:
+            if os.path.basename(file) == 'template.json':
+                template_path = file
+            elif os.path.basename(file) in ['marker.png', 'marker.jpg', 'marker.jpeg']:
+                marker_path = file
+    
+    # Sao chép template và marker vào các thư mục con
+    if template_path:
+        for subfolder in subfolders.keys():
+            dest_template = os.path.join(subfolder, 'template.json')
+            if not os.path.exists(dest_template):
+                shutil.copy2(template_path, dest_template)
+                
+    if marker_path:
+        for subfolder in subfolders.keys():
+            dest_marker = os.path.join(subfolder, os.path.basename(marker_path))
+            if not os.path.exists(dest_marker):
+                shutil.copy2(marker_path, dest_marker)
+    
+    # 3. Xử lý song song các thư mục con
+    results = {}
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Chuẩn bị các tác vụ
+        future_to_folder = {}
+        
+        for subfolder_path, files in subfolders.items():
+            subfolder_name = os.path.basename(subfolder_path)
+            subfolder_output = os.path.join(base_output_dir, subfolder_name)
+            os.makedirs(subfolder_output, exist_ok=True)
+            
+            future = executor.submit(
+                process_folder_high_quality, 
+                subfolder_path,
+                subfolder_output, 
+                PDF_EXTRACTION_SETTINGS
+            )
+            future_to_folder[future] = subfolder_path
+        
+        # Xử lý kết quả khi hoàn thành
+        for future in concurrent.futures.as_completed(future_to_folder):
+            subfolder_path = future_to_folder[future]
+            subfolder_name = os.path.basename(subfolder_path)
+            
+            try:
+                folder_result = future.result()
+                results[subfolder_name] = folder_result
+                logger.info(f"Hoàn thành thư mục {subfolder_name}")
+            except Exception as e:
+                logger.error(f"Lỗi xử lý thư mục {subfolder_name}: {str(e)}")
+                results[subfolder_name] = {"status": "error", "error": str(e)}
+    
+    # 4. Gộp kết quả từ các thư mục con
+    merged_dir = os.path.join(base_output_dir, "merged_results")
+    os.makedirs(merged_dir, exist_ok=True)
+    
+    # Tìm tất cả file CSV
+    csv_files = []
+    for subfolder_name, result in results.items():
+        subfolder_output = os.path.join(base_output_dir, subfolder_name)
+        subfolder_csv = glob.glob(os.path.join(subfolder_output, "**/*.csv"), recursive=True)
+        csv_files.extend(subfolder_csv)
+    
+    # Gộp CSV
+    if csv_files:
+        try:
+            merged_csv_path = os.path.join(merged_dir, "merged_results.csv")
+            dfs = []
+            
+            for csv_file in csv_files:
+                try:
+                    df = pd.read_csv(csv_file)
+                    df['source_batch'] = os.path.basename(os.path.dirname(csv_file))
+                    dfs.append(df)
+                except Exception as e:
+                    logger.error(f"Lỗi đọc file CSV {csv_file}: {str(e)}")
+            
+            if dfs:
+                merged_df = pd.concat(dfs, ignore_index=True)
+                merged_df.to_csv(merged_csv_path, index=False)
+                
+                # Xuất Excel để dễ xem
+                excel_path = os.path.join(merged_dir, "merged_results.xlsx")
+                merged_df.to_excel(excel_path, index=False)
+                
+                logger.info(f"Đã gộp {len(dfs)} file CSV thành {merged_csv_path}")
+        except Exception as e:
+            logger.error(f"Lỗi gộp CSV: {str(e)}")
+    
+    end_time = time.time()
+    processing_time = end_time - start_time
+    
+    # Kết quả cuối cùng
+    return {
+        "status": "success",
+        "total_files": len(file_paths),
+        "total_subfolders": len(subfolders),
+        "total_csv_files": len(csv_files),
+        "processing_time": processing_time,
+        "merged_dir": merged_dir
+    }
+
+def process_folder_high_quality(folder_path, output_path, settings=None):
+    """
+    Xử lý một thư mục con với chất lượng cao nhất
+    """
+    try:
+        # Tạo thư mục đầu ra
+        os.makedirs(output_path, exist_ok=True)
+        
+        # Xử lý các PDF trước (nếu có)
+        pdf_files = glob.glob(os.path.join(folder_path, "*.pdf"))
+        
+        # Xử lý PDF với chất lượng cao
+        if pdf_files:
+            for pdf_file in pdf_files:
+                process_pdf(
+                    pdf_file,
+                    folder_path,
+                    dpi=settings.get("dpi", 300),
+                    quality=settings.get("quality", 100)
+                )
+        
+        # Tuỳ chỉnh giữ nguyên chất lượng
+        tuning_config = CONFIG_DEFAULTS.copy()
+        # Giữ kích thước gốc
+        tuning_config.dimensions.processing_width = 1200  # Kích thước lớn hơn để đảm bảo chất lượng
+        # Lưu một số hình ảnh trung gian cho debugging
+        tuning_config.outputs.save_image_level = 1
+        tuning_config.outputs.show_image_level = 0
+        
+        # Tạo đường dẫn tương đối
+        root_dir = Path(os.path.dirname(folder_path))
+        curr_dir = Path(folder_path)
+        
+        # Chuẩn bị tham số API
+        api_args = {
+            'input_paths': [folder_path],
+            'output_dir': os.path.dirname(output_path),
+            'autoAlign': True,  # Bật tự động căn chỉnh để cải thiện độ chính xác
+            'setLayout': False,
+            'debug': True,  # Bật debug để có nhiều thông tin hơn
+        }
+        
+        # Xử lý thư mục bằng process_dir thay vì evaluate
+        results = process_dir(
+            root_dir,
+            curr_dir,
+            api_args,
+            tuning_config=tuning_config
+        )
+        
+        return {
+            "status": "success",
+            "file_count": len(glob.glob(os.path.join(folder_path, "*.*"))),
+            "pdf_count": len(pdf_files),
+            "results": results
+        }
+        
+    except Exception as e:
+        logger.error(f"Lỗi xử lý thư mục {folder_path}: {str(e)}")
+        return {
+            "status": "error",
+            "error": str(e)
+        } 

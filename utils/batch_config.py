@@ -25,17 +25,17 @@ RESOURCE_LIMITS = {
     "max_pdf_workers": min(DEFAULT_WORKERS + 2, 16),
     "max_page_workers": min(DEFAULT_WORKERS, 8),
     "max_omr_workers": min(DEFAULT_WORKERS + 4, 32),
-    "max_memory_mb": 1024,
+    "max_memory_mb": 4096,
 }
 
 # Batch processing chunk sizes for optimizing memory use
 BATCH_SIZES = {
-    "max_files_per_batch": 50,
-    "max_pdfs_per_batch": 10,
-    "pdf_page_chunk": 20,
-    "image_chunk": 100,
-    "result_chunk": 500,
-    "omr_file_chunk": 100,
+    "max_files_per_batch": 150,
+    "max_pdfs_per_batch": 25,
+    "pdf_page_chunk": 50,
+    "image_chunk": 250,
+    "result_chunk": 1000,
+    "omr_file_chunk": 250,
 }
 
 FILE_PATTERNS = {
