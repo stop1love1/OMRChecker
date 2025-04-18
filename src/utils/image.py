@@ -9,6 +9,7 @@
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
+import os
 
 from src.logger import logger
 
@@ -20,22 +21,147 @@ class ImageUtils:
     """A Static-only Class to hold common image processing utilities & wrappers over OpenCV functions"""
 
     @staticmethod
-    def save_img(path, final_marked):
-        cv2.imwrite(path, final_marked)
+    def save_img(path, im):
+        """
+        Save an image to specified path with error checking
+        
+        Args:
+            path: Path to save image
+            im: Image to save
+            
+        Returns:
+            bool: True if save was successful, False otherwise
+        """
+        try:
+            # Check if path is valid
+            if not path or not isinstance(path, str):
+                logger.error(f"Invalid save path: {path}")
+                return False
+                
+            # Check if image is None
+            if im is None:
+                logger.error(f"Cannot save None image to {path}")
+                return False
+                
+            # Get the directory path
+            directory = os.path.dirname(path)
+            
+            # Create directory if it doesn't exist
+            if directory and not os.path.exists(directory):
+                try:
+                    os.makedirs(directory, exist_ok=True)
+                except Exception as e:
+                    logger.error(f"Failed to create directory {directory}: {str(e)}")
+                    return False
+                
+            # Check if image is empty or has invalid dimensions
+            if len(im.shape) < 2:
+                logger.error(f"Invalid image format (shape={im.shape}) for {path}")
+                return False
+                
+            h, w = im.shape[:2]
+            if h <= 0 or w <= 0:
+                logger.error(f"Cannot save image with invalid dimensions (h={h}, w={w}) to {path}")
+                return False
+                
+            # Save the image
+            result = cv2.imwrite(path, im)
+            if not result:
+                logger.error(f"cv2.imwrite failed to save image to {path}")
+                return False
+                
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error saving image to {path}: {str(e)}")
+            return False
 
     @staticmethod
     def resize_util(img, u_width, u_height=None):
-        if u_height is None:
+        """
+        Resize image with proper error handling
+        
+        Args:
+            img: Input image
+            u_width: Target width
+            u_height: Target height (calculated from aspect ratio if None)
+            
+        Returns:
+            Resized image
+        """
+        try:
+            # Check if source image is valid
+            if img is None:
+                logger.error("Cannot resize None image")
+                return None
+                
+            # Get original dimensions
             h, w = img.shape[:2]
-            u_height = int(h * u_width / w)
-        return cv2.resize(img, (int(u_width), int(u_height)))
+            
+            # Check if original dimensions are valid
+            if w <= 0 or h <= 0:
+                logger.error(f"Invalid source image dimensions: {w}x{h}")
+                return None
+                
+            # Calculate height if not provided
+            if u_height is None:
+                # Maintain aspect ratio
+                u_height = int(h * u_width / w)
+                
+            # Ensure target dimensions are valid
+            if u_width <= 0 or u_height <= 0:
+                return None
+                
+            # Perform resize with integer dimensions
+            return cv2.resize(img, (int(u_width), int(u_height)))
+            
+        except Exception as e:
+            logger.error(f"Error during image resize: {str(e)}")
+            return None
 
     @staticmethod
     def resize_util_h(img, u_height, u_width=None):
-        if u_width is None:
+        """
+        Resize image by height with proper error handling
+        
+        Args:
+            img: Input image
+            u_height: Target height
+            u_width: Target width (calculated from aspect ratio if None)
+            
+        Returns:
+            Resized image
+        """
+        try:
+            # Check if source image is valid
+            if img is None:
+                logger.error("Cannot resize None image")
+                return None
+                
+            # Get original dimensions
             h, w = img.shape[:2]
-            u_width = int(w * u_height / h)
-        return cv2.resize(img, (int(u_width), int(u_height)))
+            
+            # Check if original dimensions are valid
+            if w <= 0 or h <= 0:
+                logger.error(f"Invalid source image dimensions: {w}x{h}")
+                return None
+                
+            # Calculate width if not provided
+            if u_width is None:
+                # Maintain aspect ratio
+                u_width = int(w * u_height / h)
+                
+            # Ensure target dimensions are valid
+            if u_width <= 0 or u_height <= 0:
+                logger.error(f"Invalid target dimensions: {u_width}x{u_height}")
+                return None
+                
+            # Perform resize with integer dimensions
+            return cv2.resize(img, (int(u_width), int(u_height)))
+            
+        except Exception as e:
+            logger.error(f"Error during image resize: {str(e)}")
+            return None
 
     @staticmethod
     def grab_contours(cnts):

@@ -690,30 +690,532 @@ class ImageInstanceOps:
         return thr1
 
     def append_save_img(self, key, img):
-        if self.save_image_level >= int(key):
+        """
+        Append an image to the save list for a specific level
+        
+        Args:
+            key: Level key (integer)
+            img: Image to append
+        """
+        try:
+            # Skip if image saving is disabled
+            if self.save_image_level < int(key):
+                return
+                
+            # Validate image before adding
+            if img is None:
+                from src.logger import logger
+                logger.warning(f"Attempted to append None image to level {key}")
+                return
+                
+            # Check image dimensions and type
+            try:
+                if len(img.shape) < 2 or img.size == 0:
+                    from src.logger import logger
+                    logger.warning(f"Attempted to append invalid image (shape={img.shape}) to level {key}")
+                    return
+                    
+                # Check for NaN or Inf values
+                if np.isnan(img).any() or np.isinf(img).any():
+                    from src.logger import logger
+                    logger.warning(f"Image contains NaN or Inf values, not appending to level {key}")
+                    return
+            except Exception as e:
+                from src.logger import logger
+                logger.warning(f"Error validating image for level {key}: {str(e)}")
+                return
+            
+            # Initialize the list if needed
+            if key not in self.save_img_list:
+                self.save_img_list[key] = []
+                
+            # Append a copy of the image
             self.save_img_list[key].append(img.copy())
-
-    def save_image_stacks(self, key, filename, save_dir):
-        config = self.tuning_config
-        if self.save_image_level >= int(key) and self.save_img_list[key] != []:
-            name = os.path.splitext(filename)[0]
-            result = np.hstack(
-                tuple(
-                    [
-                        ImageUtils.resize_util_h(img, config.dimensions.display_height)
-                        for img in self.save_img_list[key]
-                    ]
-                )
-            )
-            result = ImageUtils.resize_util(
-                result,
-                min(
-                    len(self.save_img_list[key]) * config.dimensions.display_width // 3,
-                    int(config.dimensions.display_width * 2.5),
-                ),
-            )
-            ImageUtils.save_img(f"{save_dir}stack/{name}_{str(key)}_stack.jpg", result)
+            
+        except Exception as e:
+            from src.logger import logger
+            logger.error(f"Error in append_save_img for level {key}: {str(e)}")
 
     def reset_all_save_img(self):
-        for i in range(self.save_image_level):
-            self.save_img_list[i + 1] = []
+        """
+        Reset all saved image lists to prepare for processing a new image
+        """
+        try:
+            # Clear all image lists
+            for i in range(self.save_image_level):
+                self.save_img_list[i + 1] = []
+                
+            # Force garbage collection to free memory
+            import gc
+            gc.collect()
+            
+        except Exception as e:
+            from src.logger import logger
+            logger.error(f"Error in reset_all_save_img: {str(e)}")
+            
+            # Attempt more aggressive reset if normal reset fails
+            try:
+                self.save_img_list.clear()
+                
+                # Re-initialize with empty lists
+                from collections import defaultdict
+                self.save_img_list = defaultdict(list)
+                
+                # Force garbage collection
+                import gc
+                gc.collect()
+                
+            except Exception as inner_e:
+                from src.logger import logger
+                logger.error(f"Failed aggressive reset in reset_all_save_img: {str(inner_e)}")
+                
+    def save_image_stacks(self, key, filename, save_dir):
+        """
+        Save stacked images for a specific level
+        
+        Args:
+            key: Image level key
+            filename: Base filename
+            save_dir: Directory path
+        """
+        try:
+            config = self.tuning_config
+            
+            # Skip if not needed or no images
+            if self.save_image_level < int(key) or not self.save_img_list[key]:
+                return
+                
+            # Validate images before stacking
+            valid_images = []
+            for img in self.save_img_list[key]:
+                try:
+                    if img is None:
+                        continue
+                    if len(img.shape) < 2 or img.size == 0:
+                        continue
+                    if np.isnan(img).any() or np.isinf(img).any():
+                        continue
+                    valid_images.append(img)
+                except Exception:
+                    continue
+                    
+            # Skip if no valid images
+            if not valid_images:
+                from src.logger import logger
+                logger.warning(f"No valid images to stack for {filename} at level {key}")
+                return
+                
+            # Create stack directory
+            stack_dir = os.path.join(save_dir, "stack")
+            try:
+                os.makedirs(stack_dir, exist_ok=True)
+            except Exception as e:
+                logger.error(f"Failed to create stack directory {stack_dir}: {str(e)}")
+                # Fallback to the main directory
+                stack_dir = save_dir
+                
+            # Process filename
+            if not isinstance(filename, str):
+                logger.warning(f"Invalid filename type: {type(filename)}, converting to string")
+                try:
+                    filename = str(filename)
+                except:
+                    filename = f"unnamed_{key}"
+                
+            # Extract base name without extension
+            name = os.path.splitext(filename)[0]
+            
+            # Check if this is a PDF page
+            is_pdf_page = "page_" in name
+            file_path = os.path.join(stack_dir, f"{name}_{str(key)}_stack.jpg")
+            
+            # For PDF pages, save to a subdirectory
+            if is_pdf_page:
+                try:
+                    pdf_base_name = name.split('_page_')[0]
+                    pdf_stack_dir = os.path.join(stack_dir, pdf_base_name)
+                    os.makedirs(pdf_stack_dir, exist_ok=True)
+                    file_path = os.path.join(pdf_stack_dir, f"{name}_{str(key)}_stack.jpg")
+                except Exception:
+                    # Fallback to original path if subdirectory creation fails
+                    pass
+            
+            # Stack images without resizing (preserve original dimensions)
+            try:
+                result = self.stack_images(valid_images, resize=False)
+                
+                if result is None:
+                    from src.logger import logger
+                    logger.error(f"Failed to stack images for {name} at level {key}")
+                    return
+                    
+                # Save with error checking
+                from src.utils.image import ImageUtils
+                success = ImageUtils.save_img(file_path, result)
+                
+                if not success:
+                    from src.logger import logger
+                    logger.warning(f"Failed to save stacked image to {file_path}, trying alternative method")
+                    try:
+                        import cv2
+                        # Try with lower quality
+                        cv2.imwrite(file_path, result, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                    except Exception as save_error:
+                        logger.error(f"Alternative save method also failed: {str(save_error)}")
+                
+            except Exception as e:
+                from src.logger import logger
+                logger.error(f"Error stacking images for {name} at level {key}: {str(e)}")
+                
+        except Exception as e:
+            from src.logger import logger
+            logger.error(f"Error in save_image_stacks: {str(e)}")
+            
+            # Try to reduce memory pressure by clearing the image list
+            try:
+                self.save_img_list[key] = []
+            except:
+                pass
+
+    def stack_images(self, images, dims=None, resize=False):
+        """Stack images vertically or in a grid
+        
+        Args:
+            images: List of images to stack
+            dims: Grid dimensions (rows, cols)
+            resize: Resize images to same dimensions (default: False - keep original size)
+            
+        Returns:
+            Stacked image or None if failed
+        """
+        try:
+            # Validate input
+            if not images:
+                logger.warning("No images provided to stack_images")
+                return None
+            
+            # Filter out None images and check for empty arrays
+            valid_images = []
+            for img in images:
+                try:
+                    if img is None:
+                        continue
+                        
+                    # Check if image is valid
+                    if len(img.shape) < 2 or img.size == 0:
+                        logger.warning(f"Invalid image shape: {img.shape}")
+                        continue
+                        
+                    # Check for NaN or Inf values
+                    if np.isnan(img).any() or np.isinf(img).any():
+                        logger.warning(f"Image contains NaN or Inf values")
+                        continue
+                        
+                    valid_images.append(img)
+                except Exception as e:
+                    logger.warning(f"Error validating image: {str(e)}")
+            
+            if not valid_images:
+                logger.warning("No valid images to stack after filtering")
+                # Create a small empty image as fallback
+                return np.zeros((100, 100, 3), dtype=np.uint8)
+            
+            # If only one valid image, return it
+            if len(valid_images) == 1:
+                return valid_images[0]
+                
+            # Limit number of images to prevent memory issues
+            MAX_IMAGES = 20
+            if len(valid_images) > MAX_IMAGES:
+                logger.warning(f"Too many images to stack ({len(valid_images)}), limiting to {MAX_IMAGES}")
+                valid_images = valid_images[:MAX_IMAGES]
+            
+            # Get dimensions of the first image for reference
+            h, w = valid_images[0].shape[:2]
+            
+            # Handle images with different number of channels
+            try:
+                channels = [img.shape[2] if len(img.shape) > 2 else 1 for img in valid_images]
+                if len(set(channels)) > 1:
+                    logger.warning("Images have different channel counts, converting all to 3 channels")
+                    for i, img in enumerate(valid_images):
+                        if len(img.shape) == 2:  # Grayscale
+                            valid_images[i] = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+                        elif img.shape[2] == 4:  # RGBA
+                            valid_images[i] = cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)
+            except Exception as e:
+                logger.warning(f"Error normalizing image channels: {str(e)}")
+                # Try to continue anyway
+            
+            # Handle different image dimensions safely
+            try:
+                # If resize is True or images have different dimensions, resize all to match the first
+                if resize or any(img.shape[:2] != valid_images[0].shape[:2] for img in valid_images[1:]):
+                    if resize:
+                        logger.info(f"Resizing all images to {w}x{h}")
+                    else:
+                        logger.info(f"Images have different dimensions, doing minimal resizing")
+                        
+                    images_resized = []
+                    for img in valid_images:
+                        try:
+                            img_h, img_w = img.shape[:2]
+                            if img_h != h or img_w != w:
+                                resized = ImageUtils.resize_util(img, w, h)
+                                if resized is not None:
+                                    images_resized.append(resized)
+                                else:
+                                    logger.warning(f"Failed to resize image from {img_w}x{img_h} to {w}x{h}, skipping")
+                            else:
+                                images_resized.append(img)
+                        except Exception as e:
+                            logger.warning(f"Error resizing image: {str(e)}, skipping")
+                    
+                    valid_images = images_resized
+                    
+                    # Check if we still have images after resizing
+                    if not valid_images:
+                        logger.warning("No valid images after resizing")
+                        return np.zeros((100, 100, 3), dtype=np.uint8)
+            except Exception as e:
+                logger.warning(f"Error during resize check: {str(e)}")
+                # Try to continue anyway
+            
+            # Stack images vertically while preserving original dimensions
+            try:
+                # Try simple stacking first
+                if dims is None or len(dims) != 2:
+                    try:
+                        # Try horizontal stacking first
+                        return cv2.hconcat(valid_images)
+                    except Exception as e1:
+                        logger.warning(f"Horizontal stacking failed: {str(e1)}, trying vertical")
+                        try:
+                            # Try vertical stacking
+                            return cv2.vconcat(valid_images)
+                        except Exception as e2:
+                            logger.warning(f"Vertical stacking failed: {str(e2)}, using fallback method")
+                            
+                            # Fallback: create a new image and copy each image into it
+                            total_height = sum(img.shape[0] for img in valid_images)
+                            max_width = max(img.shape[1] for img in valid_images)
+                            
+                            # Get number of channels (use 3 as default)
+                            channels = 3
+                            if len(valid_images[0].shape) > 2:
+                                channels = valid_images[0].shape[2]
+                                
+                            # Create output image
+                            result = np.zeros((total_height, max_width, channels), dtype=valid_images[0].dtype)
+                            
+                            # Copy each image into result
+                            y_offset = 0
+                            for img in valid_images:
+                                h, w = img.shape[:2]
+                                # Handle grayscale images
+                                if len(img.shape) == 2:
+                                    img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+                                # Copy image
+                                result[y_offset:y_offset+h, 0:w] = img
+                                y_offset += h
+                                
+                            return result
+                else:
+                    # Grid layout requested
+                    return self._create_grid(valid_images, dims)
+            except Exception as e:
+                logger.error(f"All stacking methods failed: {str(e)}")
+                # Create a simple error image with text
+                error_img = np.ones((200, 400, 3), dtype=np.uint8) * 255
+                cv2.putText(error_img, "Stacking Failed", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                return error_img
+        
+        except Exception as e:
+            logger.error(f"Error in stack_images: {str(e)}")
+            # Create a simple error image
+            error_img = np.ones((200, 400, 3), dtype=np.uint8) * 255
+            cv2.putText(error_img, "Error in stack_images", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            return error_img
+            
+    def _create_grid(self, images, dims):
+        """Helper method to create image grid
+        
+        Args:
+            images: List of images
+            dims: Grid dimensions (rows, cols)
+            
+        Returns:
+            Grid image or None if failed
+        """
+        try:
+            rows, cols = dims
+            
+            # Check if dimensions are valid
+            if rows <= 0 or cols <= 0:
+                return cv2.vconcat(images)
+            
+            # Create empty image grid with the same number of channels as input images
+            h, w = images[0].shape[:2]
+            num_channels = 1
+            if len(images[0].shape) > 2:
+                num_channels = images[0].shape[2]
+            
+            grid = np.zeros((h * rows, w * cols, num_channels), dtype=images[0].dtype)
+            
+            # Fill grid with images
+            for i in range(min(len(images), rows * cols)):
+                try:
+                    row_idx = i // cols
+                    col_idx = i % cols
+                    
+                    y_start = row_idx * h
+                    y_end = (row_idx + 1) * h
+                    x_start = col_idx * w
+                    x_end = (col_idx + 1) * w
+                    
+                    grid[y_start:y_end, x_start:x_end] = images[i]
+                except Exception as e:
+                    logger.error(f"Error adding image {i} to grid: {str(e)}")
+            
+            return grid
+        except Exception as e:
+            logger.error(f"Error creating grid: {str(e)}")
+            # Create a simple error image with text
+            error_img = np.ones((200, 400, 3), dtype=np.uint8) * 255
+            cv2.putText(error_img, "Grid Creation Failed", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            return error_img
+
+    def save_img_level_dir(self, level, name, path):
+        """
+        Save all stored images for a specific level
+        
+        Args:
+            level: Image level
+            name: Image name
+            path: Directory path
+        """
+        try:
+            # Skip if image save level is lower than requested level
+            if self.save_image_level < level:
+                return
+                
+            # Get images
+            img_list = self.save_img_list[level]
+            
+            # Skip if no images
+            if not img_list or len(img_list) == 0:
+                return
+                
+            # Create a safe file name from image name
+            import os
+            import re
+            
+            # Remove characters that aren't safe for filenames
+            safe_name = re.sub(r'[^\w\-_\. ]', '_', name)
+            
+            # For PDFs, maintain original sequential processing record
+            # If this is from a PDF, name will typically contain "page_X"
+            is_pdf_page = "page_" in safe_name
+            
+            # Ensure directory exists
+            stack_dir = os.path.join(path, "stack")
+            try:
+                os.makedirs(stack_dir, exist_ok=True)
+            except Exception as e:
+                from src.logger import logger
+                logger.error(f"Failed to create stack directory {stack_dir}: {str(e)}")
+                # Try saving directly to the parent directory as fallback
+                stack_dir = path
+            
+            # Create save path with stack suffix
+            file_path = os.path.join(stack_dir, f"{safe_name}_{level}_stack.jpg")
+            
+            # For PDF pages, save to a subdirectory to avoid cluttering the main directory
+            if is_pdf_page:
+                # Extract base PDF name and create subdirectory
+                try:
+                    pdf_base_name = safe_name.split('_page_')[0]
+                    pdf_stack_dir = os.path.join(stack_dir, pdf_base_name)
+                    os.makedirs(pdf_stack_dir, exist_ok=True)
+                    file_path = os.path.join(pdf_stack_dir, f"{safe_name}_{level}_stack.jpg")
+                except Exception as e:
+                    # Fallback to original path if subdirectory creation fails
+                    from src.logger import logger
+                    logger.warning(f"Failed to create PDF subdirectory: {str(e)}")
+                
+                # Extract page number if possible for tracking
+                try:
+                    import re
+                    page_num_match = re.search(r'page_(\d+)', safe_name)
+                    if page_num_match:
+                        page_num = int(page_num_match.group(1))
+                        # Save to a tracking file to ensure all PDF pages are processed
+                        pdf_name = safe_name.split('_page_')[0]
+                        pdf_index_path = os.path.join(path, f"{pdf_name}_processed_pages.txt")
+                        
+                        with open(pdf_index_path, 'a') as f:
+                            f.write(f"{page_num}\n")
+                except Exception as e:
+                    from src.logger import logger
+                    logger.warning(f"Failed to track PDF page number: {str(e)}")
+            
+            # Validate images before stacking
+            valid_images = []
+            for img in img_list:
+                try:
+                    if img is None:
+                        continue
+                    if len(img.shape) < 2 or img.size == 0:
+                        continue
+                    valid_images.append(img)
+                except Exception as e:
+                    # Skip invalid images
+                    pass
+            
+            # Skip if no valid images
+            if not valid_images:
+                from src.logger import logger
+                logger.warning(f"No valid images to stack for {name} at level {level}")
+                return
+            
+            # Use our safe stack_images method - KEEP ORIGINAL DIMENSIONS
+            try:
+                stacked_img = self.stack_images(valid_images, resize=False)
+                
+                # Skip if stacking failed (should not happen now with improved stack_images)
+                if stacked_img is None:
+                    from src.logger import logger
+                    logger.warning(f"Failed to stack images for {name} at level {level} - stacking returned None")
+                    return
+                
+                # Save the stacked image with error checking
+                from src.utils.image import ImageUtils
+                success = ImageUtils.save_img(file_path, stacked_img)
+                
+                if not success:
+                    from src.logger import logger
+                    logger.warning(f"Failed to save stacked image to {file_path}")
+                    
+                    # Try alternative save approach if standard save fails
+                    try:
+                        import cv2
+                        # Try with lower quality
+                        result = cv2.imwrite(file_path, stacked_img, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                        if not result:
+                            logger.error(f"Alternative save approach also failed for {file_path}")
+                    except Exception as e:
+                        logger.error(f"Alternative save approach failed with error: {str(e)}")
+                        
+            except Exception as e:
+                from src.logger import logger
+                logger.error(f"Error stacking/saving images for {name} at level {level}: {str(e)}")
+            
+        except Exception as e:
+            from src.logger import logger
+            logger.error(f"Error in save_img_level_dir: {str(e)} for {name} at level {level}")
+            
+            # Try to reduce memory pressure by clearing the image list
+            try:
+                self.save_img_list[level] = []
+            except:
+                pass

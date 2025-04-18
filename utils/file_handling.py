@@ -12,6 +12,7 @@ import requests
 from urllib.parse import urlparse
 import urllib3
 from urllib.parse import quote
+from urllib.parse import unquote
 
 from src.logger import logger
 
@@ -42,6 +43,9 @@ def transform_result_format(result_data):
 def save_to_public_images(image_path, prefix, api_host, public_images_dir):
     """Save image to public directory with unique filename and return its URL"""
     try:
+        # Ensure public images directory exists
+        os.makedirs(public_images_dir, exist_ok=True)
+        
         timestamp = int(time.time())
         unique_id = str(uuid.uuid4())[:8]
         file_ext = os.path.splitext(image_path)[1].lower()
@@ -49,11 +53,25 @@ def save_to_public_images(image_path, prefix, api_host, public_images_dir):
         filename = f"{prefix}_{timestamp}_{unique_id}{file_ext}"
         public_path = os.path.join(public_images_dir, filename)
         
+        # Create parent directory if it doesn't exist
+        os.makedirs(os.path.dirname(public_path), exist_ok=True)
+        
+        # Log paths for debugging
+        logger.info(f"Copying from {image_path} to {public_path}")
+        
+        # Check if source exists
+        if not os.path.exists(image_path):
+            logger.error(f"Source file does not exist: {image_path}")
+            return None
+            
         shutil.copy2(image_path, public_path)
         
-        return f"{api_host}/images/{filename}"
+        result_url = f"{api_host}/images/{filename}"
+        logger.info(f"Created public image URL: {result_url}")
+        return result_url
     except Exception as e:
         logger.error(f"Failed to save public image: {e}")
+        logger.error(f"Source: {image_path}, Destination dir: {public_images_dir}")
         return None
 
 def clean_folder_contents(folder_path, folder_name):
@@ -134,17 +152,20 @@ def download_file_from_url(url, target_dir, app_config=None):
         Path to the downloaded file or None if download failed
     """
     try:
+        # Make sure target directory exists
+        os.makedirs(target_dir, exist_ok=True)
+    
         # Handle spaces or special characters in URL
         url = url.strip()
         if ' ' in url:
             logger.warning(f"URL contains spaces, attempting to fix: {url}")
-            url = quote(url, safe=':/?&=@#')
+            url = url.replace(' ', '%20')
         
         # Parse URL to get path
         parsed_url = urlparse(url)
-        filename = os.path.basename(parsed_url.path)
+        filename = os.path.basename(unquote(parsed_url.path))
         
-        logger.info(f"Processing URL {url}")
+        logger.info(f"Processing URL {url}, extracted filename: {filename}")
         
         # Check if URL starts with API_HOST
         is_local_file = False
@@ -158,34 +179,85 @@ def download_file_from_url(url, target_dir, app_config=None):
         
         if is_local_file:
             relative_path = url[len(app_config['API_HOST']):]
+            # Decode URL-encoded characters in the path
+            relative_path = unquote(relative_path)
+            logger.info(f"Local file relative path: {relative_path}")
             
             if relative_path.startswith('/static/uploads/'):
+                # Extract the final filename correctly
+                filename = os.path.basename(relative_path)
                 source_path = os.path.join(
                     app_config.get('STATIC_FOLDER', 'static'),
                     'uploads',
-                    os.path.basename(relative_path)
+                    filename
                 )
                 
+                # Log debug info about paths
+                logger.info(f"Looking for local file at: {source_path}")
+                
+                # Ensure uploads directory exists
+                os.makedirs(os.path.dirname(source_path), exist_ok=True)
+                
                 if os.path.exists(source_path):
-                    target_path = os.path.join(target_dir, os.path.basename(relative_path))
+                    target_path = os.path.join(target_dir, filename)
+                    # Make sure target directory exists before copying
+                    os.makedirs(os.path.dirname(target_path), exist_ok=True)
                     shutil.copy2(source_path, target_path)
                     logger.info(f"Using local file: {source_path} -> {target_path}")
                     return target_path
                 else:
+                    # Try to find the file with similar name by listing directory contents
+                    uploads_dir = os.path.join(app_config.get('STATIC_FOLDER', 'static'), 'uploads')
+                    if os.path.exists(uploads_dir):
+                        logger.info(f"File not found directly. Searching in directory: {uploads_dir}")
+                        # List all files in the directory
+                        for file in os.listdir(uploads_dir):
+                            # Check if the first part of the filename matches
+                            if file.startswith(filename.split('_')[0]):
+                                logger.info(f"Found similar file: {file}")
+                                matched_source = os.path.join(uploads_dir, file)
+                                target_path = os.path.join(target_dir, file)
+                                shutil.copy2(matched_source, target_path)
+                                logger.info(f"Using found file: {matched_source} -> {target_path}")
+                                return target_path
+                    
                     logger.warning(f"Local file not found: {source_path}")
             
             elif relative_path.startswith('/images/'):
+                # Extract the final filename correctly
+                filename = os.path.basename(relative_path)
                 source_path = os.path.join(
                     app_config.get('PUBLIC_IMAGES_DIR_ABS', 'public/images'),
-                    os.path.basename(relative_path)
+                    filename
                 )
                 
+                # Log debug info about paths
+                logger.info(f"Looking for local file at: {source_path}")
+                
+                # Ensure images directory exists
+                os.makedirs(os.path.dirname(source_path), exist_ok=True)
+                
                 if os.path.exists(source_path):
-                    target_path = os.path.join(target_dir, os.path.basename(relative_path))
+                    target_path = os.path.join(target_dir, filename)
+                    # Make sure target directory exists before copying
+                    os.makedirs(os.path.dirname(target_path), exist_ok=True)
                     shutil.copy2(source_path, target_path)
                     logger.info(f"Using local file: {source_path} -> {target_path}")
                     return target_path
                 else:
+                    # Try to find the file with similar name
+                    images_dir = app_config.get('PUBLIC_IMAGES_DIR_ABS', 'public/images')
+                    if os.path.exists(images_dir):
+                        logger.info(f"File not found directly. Searching in directory: {images_dir}")
+                        for file in os.listdir(images_dir):
+                            if file.startswith(filename.split('_')[0]):
+                                logger.info(f"Found similar file: {file}")
+                                matched_source = os.path.join(images_dir, file)
+                                target_path = os.path.join(target_dir, file)
+                                shutil.copy2(matched_source, target_path)
+                                logger.info(f"Using found file: {matched_source} -> {target_path}")
+                                return target_path
+                    
                     logger.warning(f"Local file not found: {source_path}")
         
         # If not local or local file not found, download from URL
@@ -199,6 +271,9 @@ def download_file_from_url(url, target_dir, app_config=None):
             filename = f"url_file_{timestamp}_{unique_id}{extension}"
         
         file_path = os.path.join(target_dir, filename)
+        
+        # Ensure parent directory exists before downloading
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
         
         logger.info(f"Downloading file from URL: {url}")
         

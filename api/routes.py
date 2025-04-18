@@ -23,7 +23,7 @@ from src.logger import logger
 
 from utils.validators import validate_directory_name, clean_nan_values, force_string_conversion
 from utils.file_handling import transform_result_format, save_to_public_images, clean_all_folders, download_file_from_url, clean_old_files
-from utils.image_processing import process_pdf
+from utils.image_processing import process_pdf, validate_image, safe_resize
 from api.models import setup_models
 from api.parsers import setup_parsers
 
@@ -49,6 +49,13 @@ def setup_routes(app):
         response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
         response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
         return response
+    
+    # Ensure all required directories exist
+    os.makedirs(app.config['INPUTS_DIR_ABS'], exist_ok=True)
+    os.makedirs(app.config['OUTPUTS_DIR_ABS'], exist_ok=True)
+    os.makedirs(app.config['PROCESSED_DIR'], exist_ok=True)
+    os.makedirs(app.config['PUBLIC_IMAGES_DIR_ABS'], exist_ok=True)
+    logger.info(f"Ensured all required directories exist")
     
     # Create API blueprint
     blueprint = Blueprint('api', __name__, url_prefix='/api')
@@ -164,6 +171,9 @@ def setup_routes(app):
                 if not image_files and not file_urls:
                     return {'error': 'At least one image file or file URL must be provided'}, 400
                 
+                # Ensure INPUTS_DIR_ABS exists
+                os.makedirs(app.config['INPUTS_DIR_ABS'], exist_ok=True)
+                
                 input_dir = os.path.join(app.config['INPUTS_DIR_ABS'], directory_name)
                 
                 if clean_before and os.path.exists(input_dir):
@@ -172,7 +182,11 @@ def setup_routes(app):
                     except Exception as e:
                         logger.warning(f"Error cleaning input directory: {str(e)}")
                 
+                # Create input directory if it doesn't exist
                 os.makedirs(input_dir, exist_ok=True)
+                
+                # Ensure OUTPUTS_DIR_ABS exists
+                os.makedirs(app.config['OUTPUTS_DIR_ABS'], exist_ok=True)
                 
                 output_dir = os.path.join(app.config['OUTPUTS_DIR_ABS'], directory_name)
                 
@@ -181,6 +195,9 @@ def setup_routes(app):
                         shutil.rmtree(output_dir)
                     except Exception as e:
                         logger.warning(f"Error cleaning output directory: {str(e)}")
+                
+                # Create output directory if it doesn't exist
+                os.makedirs(output_dir, exist_ok=True)
                 
                 try:
                     template_file = args['template_file']
@@ -216,18 +233,48 @@ def setup_routes(app):
                             image_file.save(image_path)
                             regular_image_files.append(image_path)
                     
+                    # Process URL files
                     for file_url in file_urls:
+                        # Log full URL for debugging
+                        logger.info(f"Processing URL: {file_url}")
+                        
+                        # Check if URL ends with space or has encoding issues
+                        if file_url.strip() != file_url:
+                            logger.warning(f"URL contains leading/trailing spaces, cleaning: '{file_url}'")
+                            file_url = file_url.strip()
+
                         downloaded_path = download_file_from_url(file_url, input_dir, app.config)
                         
                         if downloaded_path:
+                            # For PDF files, skip validation since they're not images
                             if downloaded_path.lower().endswith('.pdf'):
+                                logger.info(f"Adding PDF file without image validation: {downloaded_path}")
                                 pdf_files.append(downloaded_path)
                             else:
-                                regular_image_files.append(downloaded_path)
+                                # Only validate image files
+                                is_valid, error_message = validate_image(downloaded_path)
+                                
+                                if is_valid:
+                                    regular_image_files.append(downloaded_path)
+                                else:
+                                    logger.warning(f"Skipping invalid image from URL {file_url}: {error_message}")
                         else:
                             logger.warning(f"Failed to download file from URL: {file_url}")
                     
                     image_paths = regular_image_files.copy()
+                    
+                    # Validate regular image files before processing
+                    valid_image_paths = []
+                    for img_path in image_paths:
+                        is_valid, error_message = validate_image(img_path)
+                        
+                        if is_valid:
+                            valid_image_paths.append(img_path)
+                        else:
+                            logger.warning(f"Skipping invalid image: {error_message}")
+                    
+                    # Update image_paths with only valid images
+                    image_paths = valid_image_paths
                     
                     if pdf_files:
                         logger.info(f"Processing {len(pdf_files)} PDF files in batch mode")
@@ -374,23 +421,39 @@ def setup_routes(app):
                         clean_result = clean_nan_values(result)
                         transformed_result = transform_result_format(clean_result)
                         
+                        # Find input and output image paths
                         input_image_path = None
                         output_image_path = None
                         
                         if 'input_path' in clean_result:
                             input_image_path = clean_result['input_path']
+                            # Verify the path exists and is valid
+                            if input_image_path and not os.path.exists(input_image_path):
+                                logger.warning(f"Input image path does not exist: {input_image_path}")
+                                input_image_path = None
                         elif 'file_id' in clean_result:
                             file_id = clean_result['file_id']
                             for img_path in image_paths:
                                 if os.path.basename(img_path) == file_id:
                                     input_image_path = img_path
                                     break
+                            
+                            if not input_image_path:
+                                logger.warning(f"Could not find image for file_id: {file_id}")
                         
                         if 'output_path' in clean_result:
                             output_image_path = clean_result['output_path']
+                            # Verify the path exists and is valid
+                            if output_image_path and not os.path.exists(output_image_path):
+                                logger.warning(f"Output image path does not exist: {output_image_path}")
+                                output_image_path = None
                         
+                        # Save images to public directory and add URLs to result
                         public_input_image = None
                         public_output_image = None
+                        
+                        # Ensure public images directory exists
+                        os.makedirs(app.config['PUBLIC_IMAGES_DIR_ABS'], exist_ok=True)
                         
                         if input_image_path and os.path.exists(input_image_path):
                             public_input_image = save_to_public_images(
@@ -661,9 +724,17 @@ def setup_routes(app):
                 if not file or file.filename == '':
                     return {'error': 'No file selected'}, 400
                 
+                # Ensure uploads directory exists (double-check)
+                uploads_dir = os.path.join(app.static_folder, 'uploads')
+                os.makedirs(uploads_dir, exist_ok=True)
+                
                 filename = secure_filename(file.filename)
                 unique_filename = f"{uuid.uuid4().hex}_{filename}"
                 file_path = os.path.join(uploads_dir, unique_filename)
+                
+                # Ensure parent directory exists
+                os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                
                 file.save(file_path)
                 
                 file_url = url_for('serve_uploaded_file', filename=unique_filename, _external=True)
@@ -696,5 +767,223 @@ def setup_routes(app):
             except Exception as e:
                 logger.error(f"Error during manual cleaning of old files: {str(e)}")
                 return {'error': f'Error cleaning old files: {str(e)}'}, 500
+
+    @ns.route('/process-batch')
+    @ns.expect(parsers['upload_parser'])
+    class ProcessBatch(Resource):
+        @ns.doc('process_batch', 
+                responses={
+                    200: 'Success',
+                    400: 'Validation Error',
+                    500: 'Processing Error'
+                })
+        def post(self):
+            """Process large batches of files by splitting into subfolders of 50 files each"""
+            try:
+                args = parsers['upload_parser'].parse_args()
+                
+                directory_name = args['directory_name']
+                
+                clean_before = args['clean_before']
+                if isinstance(clean_before, str):
+                    clean_before = clean_before.lower() != 'false'
+                
+                clean_after = args['clean_after']
+                if isinstance(clean_after, str):
+                    clean_after = clean_after.lower() != 'false'
+                
+                batch_size = args.get('batch_size', 50)
+                if isinstance(batch_size, str):
+                    try:
+                        batch_size = int(batch_size)
+                    except ValueError:
+                        batch_size = 50
+                
+                # Validate batch size
+                if batch_size < 1 or batch_size > 200:
+                    return {"error": "Batch size must be between 1 and 200"}, 400
+                    
+                logger.info(f"Processing batch OMR for directory: {directory_name} with batch size {batch_size}")
+                
+                is_valid, error_message = validate_directory_name(directory_name)
+                if not is_valid:
+                    return {"error": error_message}, 400
+                
+                image_files = args['image_files'] or []
+                file_urls = args['file_urls'] or []
+                
+                if not image_files and not file_urls:
+                    return {'error': 'At least one image file or file URL must be provided'}, 400
+                
+                # Ensure base directories exist
+                base_input_dir = os.path.join(app.config['INPUTS_DIR_ABS'], directory_name)
+                base_output_dir = os.path.join(app.config['OUTPUTS_DIR_ABS'], directory_name)
+                
+                if clean_before:
+                    # Clean directories if they exist
+                    if os.path.exists(base_input_dir):
+                        try:
+                            shutil.rmtree(base_input_dir)
+                        except Exception as e:
+                            logger.warning(f"Error cleaning input directory: {str(e)}")
+                    
+                    if os.path.exists(base_output_dir):
+                        try:
+                            shutil.rmtree(base_output_dir)
+                        except Exception as e:
+                            logger.warning(f"Error cleaning output directory: {str(e)}")
+                
+                # Create base directories
+                os.makedirs(base_input_dir, exist_ok=True)
+                os.makedirs(base_output_dir, exist_ok=True)
+                
+                # Create initial holding directory for all uploaded files
+                uploads_dir = os.path.join(base_input_dir, "_all_uploads")
+                os.makedirs(uploads_dir, exist_ok=True)
+                
+                # Process uploaded files and URLs
+                all_files = []
+                
+                # Handle template and marker files
+                try:
+                    template_file = args['template_file']
+                    if not template_file.filename.endswith('.json'):
+                        return {'error': 'Template file must be a JSON file'}, 400
+                    
+                    template_path = os.path.join(uploads_dir, 'template.json')
+                    template_file.save(template_path)
+                    
+                    marker_file = args['marker_file']
+                    if marker_file and not any(marker_file.filename.lower().endswith(ext) 
+                                  for ext in ['.png', '.jpg', '.jpeg']):
+                        return {'error': f'Marker file {marker_file.filename} must be a PNG, JPG, or JPEG file'}, 400
+                    
+                    if marker_file:
+                        marker_path = os.path.join(uploads_dir, 'marker.png')
+                        marker_file.save(marker_path)
+                        
+                        if not os.path.exists(marker_path):
+                            logger.error(f"Failed to save marker file at {marker_path}")
+                
+                except Exception as e:
+                    logger.error(f"Error handling template/marker files: {str(e)}")
+                    return {'error': f'Error handling template files: {str(e)}'}, 500
+                
+                # Save uploaded image files
+                for image_file in image_files:
+                    image_path = os.path.join(uploads_dir, image_file.filename)
+                    image_file.save(image_path)
+                    all_files.append(image_path)
+                
+                # Process URL files
+                for file_url in file_urls:
+                    # Clean URL if needed
+                    if file_url.strip() != file_url:
+                        file_url = file_url.strip()
+                    
+                    downloaded_path = download_file_from_url(file_url, uploads_dir, app.config)
+                    
+                    if downloaded_path:
+                        all_files.append(downloaded_path)
+                    else:
+                        logger.warning(f"Failed to download file from URL: {file_url}")
+                
+                # Validate all files before processing
+                valid_files = []
+                for file_path in all_files:
+                    # PDF files don't need image validation
+                    if file_path.lower().endswith('.pdf'):
+                        valid_files.append(file_path)
+                        continue
+                        
+                    is_valid, error_message = validate_image(file_path)
+                    if is_valid:
+                        valid_files.append(file_path)
+                    else:
+                        logger.warning(f"Skipping invalid file: {os.path.basename(file_path)} - {error_message}")
+                
+                if not valid_files:
+                    return {'error': 'No valid files to process'}, 400
+                
+                # Organize files into subfolders
+                from utils.image_processing import organize_files_into_subfolders, process_subfolder_batches
+                
+                batch_start_time = time.time()
+                
+                # Step 1: Organize files
+                subfolder_map = organize_files_into_subfolders(valid_files, base_input_dir, files_per_folder=batch_size)
+                
+                # Copy template and marker to each subfolder
+                for subfolder_path in subfolder_map.keys():
+                    # Copy template file
+                    shutil.copy2(template_path, os.path.join(subfolder_path, 'template.json'))
+                    
+                    # Copy marker file if it exists
+                    if marker_file and os.path.exists(marker_path):
+                        shutil.copy2(marker_path, os.path.join(subfolder_path, 'marker.png'))
+                
+                # Step 2: Process each subfolder and merge results
+                processing_results = process_subfolder_batches(subfolder_map, base_output_dir)
+                
+                # Build response data
+                merged_dir = processing_results.get('merged_dir', '')
+                merged_csv_path = os.path.join(merged_dir, "merged_results.csv")
+                
+                # Read merged results if available
+                results_data = []
+                if os.path.exists(merged_csv_path):
+                    try:
+                        df = pd.read_csv(merged_csv_path, dtype={'studentId': str, 'code': str})
+                        df = force_string_conversion(df, ['studentId', 'code'])
+                        df = df.replace([np.inf, -np.inf], 'Infinity')
+                        df = df.fillna("")
+                        results_data = df.to_dict(orient='records')
+                    except Exception as e:
+                        logger.error(f"Error reading merged results: {str(e)}")
+                
+                # Clean up results data
+                clean_results = []
+                for result in results_data:
+                    clean_result = clean_nan_values(result)
+                    transformed_result = transform_result_format(clean_result)
+                    clean_results.append(transformed_result)
+                
+                batch_end_time = time.time()
+                batch_total_time = batch_end_time - batch_start_time
+                
+                # Create response data
+                response_data = {
+                    'message': 'Batch processing completed successfully',
+                    'directory_name': directory_name,
+                    'input_dir': str(base_input_dir),
+                    'output_dir': str(base_output_dir),
+                    'processed_files': {
+                        'total_files': len(valid_files),
+                        'total_subfolders': processing_results.get('total_subfolders', 0),
+                        'total_csv_files': processing_results.get('total_csv_files', 0),
+                        'total_pdf_pages': processing_results.get('total_pdf_pages', 0)
+                    },
+                    'timing': {
+                        'total_processing': round(batch_total_time, 2)
+                    },
+                    'results': clean_results
+                }
+                
+                # Clean up if requested
+                if clean_after:
+                    try:
+                        # First clean uploads directory
+                        if os.path.exists(uploads_dir):
+                            shutil.rmtree(uploads_dir)
+                            
+                        # Don't clean output directory as it contains results
+                    except Exception as e:
+                        logger.warning(f"Error cleaning directories after processing: {str(e)}")
+                
+                return response_data, 200
+                
+            except Exception as e:
+                logger.error(f"Error in batch processing: {str(e)}")
+                return {'error': f'Error in batch processing: {str(e)}'}, 500
 
     return api 
