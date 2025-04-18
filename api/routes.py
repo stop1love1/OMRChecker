@@ -8,6 +8,7 @@ import math
 import numpy as np
 import shutil
 import time
+import threading
 from pathlib import Path
 import pandas as pd
 import requests
@@ -29,6 +30,69 @@ from utils.image_processing import process_pdf, validate_image, safe_resize
 from api.models import setup_models
 from api.parsers import setup_parsers
 
+# Simple in-memory task queue
+tasks = {}
+
+class TaskStatusEnum:
+    PENDING = "pending"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+class Task:
+    def __init__(self, task_id, directory_name):
+        self.task_id = task_id
+        self.directory_name = directory_name
+        self.status = TaskStatusEnum.PENDING
+        self.result = None
+        self.error = None
+        self.start_time = None
+        self.end_time = None
+        self.progress = 0
+        self.total_files = 0
+        self.processed_files = 0
+        self.current_stage = "initializing"
+        self.stage_progress = 0
+        self.stage_details = ""
+        self.estimated_remaining_time = None
+        self.last_updated = time.time()
+    
+    def update_progress(self, stage, progress, details="", increment_processed=0):
+        """Update task progress with stage information"""
+        self.current_stage = stage
+        self.stage_progress = progress
+        self.stage_details = details
+        self.last_updated = time.time()
+        
+        if increment_processed > 0:
+            self.processed_files += increment_processed
+            
+        if self.total_files > 0:
+            self.progress = min(int((self.processed_files / self.total_files) * 100), 99)
+            
+        # Rough estimate of remaining time
+        if self.progress > 0 and self.start_time:
+            elapsed = self.last_updated - self.start_time
+            total_estimated = (elapsed / self.progress) * 100
+            self.estimated_remaining_time = max(0, total_estimated - elapsed)
+            
+    def complete(self, result):
+        """Mark task as completed with result"""
+        self.status = TaskStatusEnum.COMPLETED
+        self.result = result
+        self.end_time = time.time()
+        self.progress = 100
+        self.current_stage = "completed"
+        self.stage_progress = 100
+        self.estimated_remaining_time = 0
+        
+    def fail(self, error_message):
+        """Mark task as failed with error message"""
+        self.status = TaskStatusEnum.FAILED
+        self.error = error_message
+        self.end_time = time.time()
+        self.current_stage = "failed"
+
 class CustomJSONEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, float):
@@ -48,9 +112,16 @@ def setup_routes(app):
     @app.after_request
     def add_cors_headers(response):
         response.headers.add('Access-Control-Allow-Origin', '*')
-        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Requested-With')
         response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+        response.headers.add('Access-Control-Allow-Credentials', 'true')
         return response
+    
+    # Handle OPTIONS requests for CORS preflight
+    @app.route('/', defaults={'path': ''}, methods=['OPTIONS'])
+    @app.route('/<path:path>', methods=['OPTIONS'])
+    def handle_options(path):
+        return '', 204
     
     # Ensure all required directories exist
     os.makedirs(app.config['INPUTS_DIR_ABS'], exist_ok=True)
@@ -136,22 +207,16 @@ def setup_routes(app):
             mimetype='application/json'
         )
     
-    # Define API resources
-    @ns.route('/process-omr')
-    @ns.expect(parsers['upload_parser'])
-    class ProcessOMR(Resource):
-        @ns.doc('process_omr', 
-                responses={
-                    200: 'Success',
-                    400: 'Validation Error',
-                    500: 'Processing Error'
-                })
-        def post(self):
-            """Process multiple OMR sheets with the provided template"""
-            try:
-                args = parsers['upload_parser'].parse_args()
-                
-                directory_name = args['directory_name']
+    # Function to process OMR in background
+    def process_omr_task(app_config, task_id, args, file_urls):
+        task = tasks[task_id]
+        task.status = TaskStatusEnum.PROCESSING
+        task.start_time = time.time()
+        task.update_progress("initializing", 0, "Setting up task")
+        
+        try:
+            with app.app_context():
+                directory_name = task.directory_name
                 
                 clean_before = args['clean_before']
                 if isinstance(clean_before, str):
@@ -161,22 +226,20 @@ def setup_routes(app):
                 if isinstance(clean_after, str):
                     clean_after = clean_after.lower() != 'false'
                 
-                logger.info(f"Processing OMR for directory: {directory_name}")
+                logger.info(f"Processing OMR for directory: {directory_name} (Task ID: {task_id})")
                 
                 is_valid, error_message = validate_directory_name(directory_name)
                 if not is_valid:
-                    return {"error": error_message}, 400
+                    task.status = TaskStatusEnum.FAILED
+                    task.error = error_message
+                    task.end_time = time.time()
+                    return
                 
-                image_files = args['image_files'] or []
-                file_urls = args['file_urls'] or []
-                
-                if not image_files and not file_urls:
-                    return {'error': 'At least one image file or file URL must be provided'}, 400
-                
+                task.update_progress("preparing", 10, "Creating directories")
                 # Ensure INPUTS_DIR_ABS exists
-                os.makedirs(app.config['INPUTS_DIR_ABS'], exist_ok=True)
+                os.makedirs(app_config['INPUTS_DIR_ABS'], exist_ok=True)
                 
-                input_dir = os.path.join(app.config['INPUTS_DIR_ABS'], directory_name)
+                input_dir = os.path.join(app_config['INPUTS_DIR_ABS'], directory_name)
                 
                 if clean_before and os.path.exists(input_dir):
                     try:
@@ -188,9 +251,9 @@ def setup_routes(app):
                 os.makedirs(input_dir, exist_ok=True)
                 
                 # Ensure OUTPUTS_DIR_ABS exists
-                os.makedirs(app.config['OUTPUTS_DIR_ABS'], exist_ok=True)
+                os.makedirs(app_config['OUTPUTS_DIR_ABS'], exist_ok=True)
                 
-                output_dir = os.path.join(app.config['OUTPUTS_DIR_ABS'], directory_name)
+                output_dir = os.path.join(app_config['OUTPUTS_DIR_ABS'], directory_name)
                 
                 if clean_before and os.path.exists(output_dir):
                     try:
@@ -202,120 +265,147 @@ def setup_routes(app):
                 os.makedirs(output_dir, exist_ok=True)
                 
                 try:
-                    template_file = args['template_file']
-                    if template_file:
-                        if not template_file.filename.endswith('.json'):
-                            return {'error': 'Template file must be a JSON file'}, 400
-                        
+                    task.update_progress("setup", 20, "Setting up template and marker files")
+                    # Handle template file
+                    if args.get('saved_template_path'):
                         template_path = os.path.join(input_dir, 'template.json')
-                        template_file.save(template_path)
+                        shutil.copy2(args['saved_template_path'], template_path)
+                        task.update_progress("setup", 25, "Template file processed")
                     elif args.get('template_url'):
                         template_url = args.get('template_url')
+                        task.update_progress("setup", 22, f"Downloading template from URL")
                         try:
                             response = requests.get(template_url, timeout=30)
                             if response.status_code != 200:
-                                return {'error': f'Failed to download template file from URL: {template_url}, status code: {response.status_code}'}, 400
+                                task.fail(f'Failed to download template file from URL: {template_url}, status code: {response.status_code}')
+                                return
                             
                             template_path = os.path.join(input_dir, 'template.json')
                             with open(template_path, 'wb') as f:
                                 f.write(response.content)
+                            task.update_progress("setup", 25, "Template downloaded and saved")
                         except Exception as e:
-                            return {'error': f'Error downloading template from URL: {str(e)}'}, 400
+                            task.fail(f'Error downloading template from URL: {str(e)}')
+                            return
                     else:
-                        return {'error': 'Either template_file or template_url must be provided'}, 400
+                        task.fail('No template file provided')
+                        return
                     
-                    marker_file = args.get('marker_file')
-                    if marker_file:
-                        if not any(marker_file.filename.lower().endswith(ext) 
-                                  for ext in ['.png', '.jpg', '.jpeg']):
-                            return {'error': f'Marker file {marker_file.filename} must be a PNG, JPG, or JPEG file'}, 400
-                        
+                    # Handle marker file
+                    if args.get('saved_marker_path'):
                         marker_path = os.path.join(input_dir, 'marker.png')
-                        marker_file.save(marker_path)
-                        
-                        if not os.path.exists(marker_path):
-                            logger.error(f"Failed to save marker file at {marker_path}")
+                        shutil.copy2(args['saved_marker_path'], marker_path)
+                        task.update_progress("setup", 30, "Marker file processed")
                     elif args.get('marker_url'):
                         marker_url = args.get('marker_url')
+                        task.update_progress("setup", 28, f"Downloading marker from URL")
                         try:
                             response = requests.get(marker_url, timeout=30)
                             if response.status_code != 200:
-                                return {'error': f'Failed to download marker file from URL: {marker_url}, status code: {response.status_code}'}, 400
+                                task.fail(f'Failed to download marker file from URL: {marker_url}, status code: {response.status_code}')
+                                return
                             
                             marker_path = os.path.join(input_dir, 'marker.png')
                             with open(marker_path, 'wb') as f:
                                 f.write(response.content)
+                            task.update_progress("setup", 30, "Marker downloaded and saved")
                         except Exception as e:
-                            return {'error': f'Error downloading marker from URL: {str(e)}'}, 400
+                            task.fail(f'Error downloading marker from URL: {str(e)}')
+                            return
                     else:
-                        return {'error': 'Either marker_file or marker_url must be provided'}, 400
+                        task.fail('No marker file provided')
+                        return
                     
                     pdf_files = []
                     regular_image_files = []
                     
-                    for image_file in image_files:
-                        if image_file.filename.lower().endswith('.pdf'):
-                            logger.info(f"Found PDF file: {image_file.filename}")
-                            pdf_path = os.path.join(input_dir, image_file.filename)
-                            image_file.save(pdf_path)
-                            pdf_files.append(pdf_path)
-                        else:
-                            image_path = os.path.join(input_dir, image_file.filename)
-                            image_file.save(image_path)
-                            regular_image_files.append(image_path)
+                    task.update_progress("processing_files", 35, "Processing input files")
+                    # Handle saved image files
+                    if args.get('saved_image_files'):
+                        saved_files_count = len(args['saved_image_files'])
+                        task.update_progress("processing_files", 35, f"Processing {saved_files_count} saved files")
+                        for i, img_path in enumerate(args['saved_image_files']):
+                            filename = os.path.basename(img_path)
+                            dest_path = os.path.join(input_dir, filename)
+                            shutil.copy2(img_path, dest_path)
+                            
+                            file_progress = 35 + (i / saved_files_count * 5)
+                            task.update_progress("processing_files", file_progress, f"Processed file {i+1}/{saved_files_count}: {filename}")
+                            
+                            if img_path.lower().endswith('.pdf'):
+                                pdf_files.append(dest_path)
+                            else:
+                                regular_image_files.append(dest_path)
                     
                     # Process URL files
-                    for file_url in file_urls:
-                        # Log full URL for debugging
-                        logger.info(f"Processing URL: {file_url}")
-                        
-                        # Check if URL ends with space or has encoding issues
-                        if file_url.strip() != file_url:
-                            logger.warning(f"URL contains leading/trailing spaces, cleaning: '{file_url}'")
-                            file_url = file_url.strip()
-
-                        downloaded_path = download_file_from_url(file_url, input_dir, app.config)
-                        
-                        if downloaded_path:
-                            # For PDF files, skip validation since they're not images
-                            if downloaded_path.lower().endswith('.pdf'):
-                                logger.info(f"Adding PDF file without image validation: {downloaded_path}")
-                                pdf_files.append(downloaded_path)
-                            else:
-                                # Only validate image files
-                                is_valid, error_message = validate_image(downloaded_path)
-                                
-                                if is_valid:
-                                    regular_image_files.append(downloaded_path)
+                    if file_urls:
+                        url_count = len(file_urls)
+                        task.update_progress("downloading", 40, f"Downloading {url_count} files from URLs")
+                        for i, file_url in enumerate(file_urls):
+                            # Log full URL for debugging
+                            logger.info(f"Processing URL: {file_url}")
+                            
+                            # Check if URL ends with space or has encoding issues
+                            if file_url.strip() != file_url:
+                                logger.warning(f"URL contains leading/trailing spaces, cleaning: '{file_url}'")
+                                file_url = file_url.strip()
+                            
+                            url_progress = 40 + (i / url_count * 10)
+                            task.update_progress("downloading", url_progress, f"Downloading file {i+1}/{url_count}")
+                            downloaded_path = download_file_from_url(file_url, input_dir, app_config)
+                            
+                            if downloaded_path:
+                                # For PDF files, skip validation since they're not images
+                                if downloaded_path.lower().endswith('.pdf'):
+                                    logger.info(f"Adding PDF file without image validation: {downloaded_path}")
+                                    pdf_files.append(downloaded_path)
                                 else:
-                                    logger.warning(f"Skipping invalid image from URL {file_url}: {error_message}")
-                        else:
-                            logger.warning(f"Failed to download file from URL: {file_url}")
+                                    # Only validate image files
+                                    is_valid, error_message = validate_image(downloaded_path)
+                                    
+                                    if is_valid:
+                                        regular_image_files.append(downloaded_path)
+                                    else:
+                                        logger.warning(f"Skipping invalid image from URL {file_url}: {error_message}")
+                            else:
+                                logger.warning(f"Failed to download file from URL: {file_url}")
                     
                     image_paths = regular_image_files.copy()
                     
                     # Validate regular image files before processing
                     valid_image_paths = []
-                    for img_path in image_paths:
-                        is_valid, error_message = validate_image(img_path)
-                        
-                        if is_valid:
-                            valid_image_paths.append(img_path)
-                        else:
-                            logger.warning(f"Skipping invalid image: {error_message}")
+                    if image_paths:
+                        task.update_progress("validating", 50, f"Validating {len(image_paths)} image files")
+                        for i, img_path in enumerate(image_paths):
+                            is_valid, error_message = validate_image(img_path)
+                            
+                            if is_valid:
+                                valid_image_paths.append(img_path)
+                            else:
+                                logger.warning(f"Skipping invalid image: {error_message}")
+                            
+                            validation_progress = 50 + (i / len(image_paths) * 5)
+                            task.update_progress("validating", validation_progress, f"Validated file {i+1}/{len(image_paths)}")
                     
                     # Update image_paths with only valid images
                     image_paths = valid_image_paths
                     
+                    # Update task with total files count
+                    task.total_files = len(image_paths) + len(pdf_files)
+                    task.update_progress("processing", 55, f"Processing {task.total_files} files in total")
+                    
+                    # Process PDFs if any
                     if pdf_files:
-                        logger.info(f"Processing {len(pdf_files)} PDF files in batch mode")
+                        pdf_count = len(pdf_files)
+                        logger.info(f"Processing {pdf_count} PDF files in batch mode")
+                        task.update_progress("pdf_processing", 60, f"Extracting images from {pdf_count} PDF files")
                         pdf_start_time = time.time()
                         
                         try:
                             from utils.image_processing import process_pdf_batch
                             from utils.batch_config import get_batch_profile
                             
-                            batch_profile = get_batch_profile(len(pdf_files))
+                            batch_profile = get_batch_profile(pdf_count)
                             
                             pdf_results = process_pdf_batch(
                                 pdf_files, 
@@ -324,8 +414,10 @@ def setup_routes(app):
                                 quality=batch_profile["quality"]
                             )
                             
+                            extracted_images = 0
                             for pdf_path, paths in pdf_results.items():
                                 image_paths.extend(paths)
+                                extracted_images += len(paths)
                                 
                                 try:
                                     os.remove(pdf_path)
@@ -333,16 +425,21 @@ def setup_routes(app):
                                     logger.warning(f"Could not remove PDF file {pdf_path}: {str(rm_error)}")
                             
                             pdf_total_time = time.time() - pdf_start_time
-                            logger.info(f"Batch PDF processing completed in {pdf_total_time:.2f} seconds for {len(pdf_files)} PDFs")
+                            logger.info(f"Batch PDF processing completed in {pdf_total_time:.2f} seconds for {pdf_count} PDFs")
+                            task.update_progress("pdf_processing", 70, f"Extracted {extracted_images} images from {pdf_count} PDF files")
                             
                         except Exception as batch_error:
                             logger.error(f"Error in batch PDF processing: {str(batch_error)}")
                             logger.info("Falling back to individual PDF processing")
+                            task.update_progress("pdf_processing", 60, f"Batch processing failed, falling back to individual processing")
                             
                             from utils.image_processing import process_pdf
                             
-                            for pdf_path in pdf_files:
+                            for i, pdf_path in enumerate(pdf_files):
                                 try:
+                                    individual_progress = 60 + (i / pdf_count * 10)
+                                    task.update_progress("pdf_processing", individual_progress, f"Processing PDF {i+1}/{pdf_count}")
+                                    
                                     new_image_paths = process_pdf(
                                         pdf_path, 
                                         input_dir,
@@ -351,6 +448,8 @@ def setup_routes(app):
                                         max_workers=12
                                     )
                                     image_paths.extend(new_image_paths)
+                                    task.update_progress("pdf_processing", individual_progress + 5, 
+                                                         f"Extracted {len(new_image_paths)} images from PDF {i+1}/{pdf_count}")
                                     
                                     try:
                                         os.remove(pdf_path)
@@ -361,11 +460,13 @@ def setup_routes(app):
                                     logger.error(f"Error processing PDF file {pdf_path}: {str(pdf_error)}")
                     
                     if not image_paths:
-                        return {'error': 'No valid images to process'}, 400
-                                    
+                        task.fail('No valid images to process')
+                        return
+                        
+                    task.update_progress("omr_processing", 75, f"Starting OMR processing for {len(image_paths)} images")                
                     api_args = {
                         'input_paths': [input_dir],
-                        'output_dir': app.config['OUTPUTS_DIR_ABS'],
+                        'output_dir': app_config['OUTPUTS_DIR_ABS'],
                         'autoAlign': False,
                         'setLayout': False,
                         'debug': True,
@@ -387,11 +488,13 @@ def setup_routes(app):
                     
                     template = Template(Path(template_path), tuning_config)
                     
-                    root_dir = Path(app.config['INPUTS_DIR_ABS'])
+                    root_dir = Path(app_config['INPUTS_DIR_ABS'])
                     curr_dir = Path(input_dir)
                     
                     omr_start_time = time.time()
                     
+                    # Process OMR sheets
+                    task.update_progress("omr_scanning", 80, f"Scanning OMR sheets")
                     results = process_dir(
                         root_dir,
                         curr_dir,
@@ -399,6 +502,9 @@ def setup_routes(app):
                         template=template,
                         tuning_config=tuning_config
                     )
+                    
+                    # Update task progress to 90%
+                    task.update_progress("results_processing", 90, f"Processing results")
                     
                     output_dir_path = Path(output_dir)
                     
@@ -420,10 +526,12 @@ def setup_routes(app):
                             results_file = all_csv_files
                     
                     if not results_file:
-                        return {'error': 'Processing failed - no results generated'}, 500
+                        task.fail('Processing failed - no results generated')
+                        return
                     
                     csv_file_path = results_file[0]
                     
+                    task.update_progress("preparing_results", 95, f"Reading results from {csv_file_path.name}")
                     df = pd.read_csv(csv_file_path, dtype={'studentId': str, 'code': str})
                     
                     df = force_string_conversion(df, ['studentId', 'code'])
@@ -434,9 +542,11 @@ def setup_routes(app):
                     results_data = df.to_dict(orient='records')
                     
                     result_id = str(uuid.uuid4())
-                    result_dir = Path(app.config['PROCESSED_DIR']) / result_id
+                    result_dir = Path(app_config['PROCESSED_DIR']) / result_id
                     os.makedirs(result_dir, exist_ok=True)
                     
+                    # Copy results to permanent storage
+                    task.update_progress("saving_results", 97, f"Saving result files")
                     for file in output_dir_path.glob('**/*'):
                         if file.is_file():
                             try:
@@ -447,6 +557,7 @@ def setup_routes(app):
                             except Exception as copy_error:
                                 logger.warning(f"Error copying file {file}: {str(copy_error)}")
                     
+                    task.update_progress("processing_images", 98, f"Processing result images")
                     clean_results = []
                     for result in results_data:
                         clean_result = clean_nan_values(result)
@@ -484,14 +595,14 @@ def setup_routes(app):
                         public_output_image = None
                         
                         # Ensure public images directory exists
-                        os.makedirs(app.config['PUBLIC_IMAGES_DIR_ABS'], exist_ok=True)
+                        os.makedirs(app_config['PUBLIC_IMAGES_DIR_ABS'], exist_ok=True)
                         
                         if input_image_path and os.path.exists(input_image_path):
                             public_input_image = save_to_public_images(
                                 input_image_path, 
                                 "input", 
-                                app.config['API_HOST'], 
-                                app.config['PUBLIC_IMAGES_DIR_ABS']
+                                app_config['API_HOST'], 
+                                app_config['PUBLIC_IMAGES_DIR_ABS']
                             )
                             if public_input_image:
                                 transformed_result['input_image_url'] = public_input_image
@@ -500,8 +611,8 @@ def setup_routes(app):
                             public_output_image = save_to_public_images(
                                 output_image_path, 
                                 "output", 
-                                app.config['API_HOST'], 
-                                app.config['PUBLIC_IMAGES_DIR_ABS']
+                                app_config['API_HOST'], 
+                                app_config['PUBLIC_IMAGES_DIR_ABS']
                             )
                             if public_output_image:
                                 transformed_result['output_image_url'] = public_output_image
@@ -512,9 +623,11 @@ def setup_routes(app):
                     total_processing_time = end_time - omr_start_time
                     logger.info(f"Total processing completed in {total_processing_time:.2f} seconds")
                     
+                    task.update_progress("finalizing", 99, f"Finalizing results")
                     response_data = {
                         'message': 'OMR processing completed successfully',
                         'result_id': result_id,
+                        'task_id': task_id,
                         'input_dir': str(input_dir),
                         'output_dir': str(output_dir),
                         'csv_file': str(csv_file_path.name),
@@ -523,6 +636,9 @@ def setup_routes(app):
                         },
                         'results': clean_results
                     }
+                    
+                    # Update task result
+                    task.complete(response_data)
                     
                     if clean_after:
                         try:
@@ -534,15 +650,120 @@ def setup_routes(app):
                         except Exception as e:
                             logger.warning(f"Error cleaning directories after processing: {str(e)}")
                     
-                    return response_data, 200
+                    # Clean up temporary directory
+                    temp_dir = os.path.join(app_config['INPUTS_DIR_ABS'], f"temp_{task_id}")
+                    if os.path.exists(temp_dir):
+                        try:
+                            shutil.rmtree(temp_dir)
+                        except Exception as e:
+                            logger.warning(f"Error cleaning temp directory: {str(e)}")
                     
                 except Exception as e:
                     logger.error(f"Error processing OMR: {str(e)}")
-                    return {'error': f'Error processing OMR: {str(e)}'}, 500
-
+                    task.fail(f'Error processing OMR: {str(e)}')
+                    
+                    # Clean up temporary directory even on failure
+                    temp_dir = os.path.join(app_config['INPUTS_DIR_ABS'], f"temp_{task_id}")
+                    if os.path.exists(temp_dir):
+                        try:
+                            shutil.rmtree(temp_dir)
+                        except Exception as clean_err:
+                            logger.warning(f"Error cleaning temp directory after error: {str(clean_err)}")
+        
+        except Exception as e:
+            logger.error(f"Unexpected error in task processing: {str(e)}")
+            task.fail(f'Unexpected error: {str(e)}')
+    
+    # Define API resources
+    @ns.route('/process-omr')
+    @ns.expect(parsers['upload_parser'])
+    class ProcessOMR(Resource):
+        @ns.doc('process_omr', 
+                responses={
+                    200: 'Task created successfully',
+                    400: 'Validation Error',
+                    500: 'Processing Error'
+                })
+        def post(self):
+            """Create a task to process multiple OMR sheets with the provided template"""
+            try:
+                args = parsers['upload_parser'].parse_args()
+                
+                directory_name = args['directory_name']
+                
+                logger.info(f"Creating task for OMR processing, directory: {directory_name}")
+                
+                is_valid, error_message = validate_directory_name(directory_name)
+                if not is_valid:
+                    return {"error": error_message}, 400
+                
+                image_files = args['image_files'] or []
+                file_urls = args['file_urls'] or []
+                
+                if not image_files and not file_urls:
+                    return {'error': 'At least one image file or file URL must be provided'}, 400
+                
+                # Generate a task ID
+                task_id = str(uuid.uuid4())
+                
+                # Create a new task
+                task = Task(task_id, directory_name)
+                tasks[task_id] = task
+                
+                # Create a temporary directory for this task
+                temp_dir = os.path.join(app.config['INPUTS_DIR_ABS'], f"temp_{task_id}")
+                os.makedirs(temp_dir, exist_ok=True)
+                
+                # Save uploaded files to temp directory
+                saved_files = []
+                if image_files:
+                    for file in image_files:
+                        temp_path = os.path.join(temp_dir, secure_filename(file.filename))
+                        file.save(temp_path)
+                        saved_files.append(temp_path)
+                
+                # Save template and marker files if present
+                template_path = None
+                if args.get('template_file'):
+                    template_file = args.get('template_file')
+                    template_path = os.path.join(temp_dir, 'template.json')
+                    template_file.save(template_path)
+                
+                marker_path = None
+                if args.get('marker_file'):
+                    marker_file = args.get('marker_file')
+                    marker_path = os.path.join(temp_dir, 'marker.png')
+                    marker_file.save(marker_path)
+                
+                # Create a copy of args without file objects
+                args_copy = args.copy()
+                args_copy['image_files'] = None
+                args_copy['template_file'] = None
+                args_copy['marker_file'] = None
+                
+                # Add paths to saved files
+                args_copy['saved_image_files'] = saved_files
+                args_copy['saved_template_path'] = template_path
+                args_copy['saved_marker_path'] = marker_path
+                
+                # Start a new thread to process the task
+                thread = threading.Thread(
+                    target=process_omr_task,
+                    args=(app.config.copy(), task_id, args_copy, file_urls)
+                )
+                thread.daemon = True
+                thread.start()
+                
+                return {
+                    'message': 'OMR processing task created successfully',
+                    'task_id': task_id,
+                    'status': TaskStatusEnum.PENDING,
+                    'directory_name': directory_name
+                }, 200
+                
             except Exception as e:
-                logger.error(f"Error processing OMR: {str(e)}")
-                return {'error': f'Error processing OMR: {str(e)}'}, 500
+                logger.error(f"Error creating OMR processing task: {str(e)}")
+                return {'error': f'Error creating OMR processing task: {str(e)}'}, 500
 
         @ns.doc('process_omr_get',
                 responses={
@@ -605,6 +826,56 @@ def setup_routes(app):
                 'clean_before': clean_before,
                 'clean_after': clean_after
             }, 200
+
+    @ns.route('/tasks/<string:task_id>')
+    @ns.param('task_id', 'The unique identifier for the task')
+    class TaskStatus(Resource):
+        @ns.doc('get_task_status', 
+                responses={
+                    200: 'Success', 
+                    404: 'Task not found'
+                })
+        def get(self, task_id):
+            """Get status of a specific OMR processing task"""
+            if task_id not in tasks:
+                return {'error': 'Task not found'}, 404
+            
+            task = tasks[task_id]
+            
+            response = {
+                'task_id': task.task_id,
+                'directory_name': task.directory_name,
+                'status': task.status,
+                'progress': task.progress,
+                'total_files': task.total_files,
+                'processed_files': task.processed_files,
+                'created_at': task.start_time or time.time(),
+                'current_stage': task.current_stage,
+                'stage_progress': task.stage_progress,
+                'stage_details': task.stage_details,
+                'last_updated': task.last_updated
+            }
+            
+            if task.estimated_remaining_time is not None:
+                response['estimated_remaining_seconds'] = round(task.estimated_remaining_time)
+                
+                # Add human-readable estimate
+                minutes, seconds = divmod(round(task.estimated_remaining_time), 60)
+                if minutes > 0:
+                    response['estimated_remaining'] = f"{minutes}m {seconds}s"
+                else:
+                    response['estimated_remaining'] = f"{seconds}s"
+            
+            if task.status == TaskStatusEnum.COMPLETED:
+                response['result'] = task.result
+                response['completed_at'] = task.end_time
+                response['processing_time'] = round(task.end_time - task.start_time, 2) if task.start_time else None
+            
+            if task.status == TaskStatusEnum.FAILED:
+                response['error'] = task.error
+                response['failed_at'] = task.end_time
+            
+            return response, 200
 
     @ns.route('/results/<string:result_id>')
     @ns.param('result_id', 'The unique identifier for the result set')
@@ -992,10 +1263,10 @@ def setup_routes(app):
                                     os.remove(pdf_path)
                                 except Exception as rm_error:
                                     logger.warning(f"Could not remove PDF file {pdf_path}: {str(rm_error)}")
-                                
+                                    
                             except Exception as pdf_error:
                                 logger.error(f"Error processing PDF file {pdf_path}: {str(pdf_error)}")
-                
+                    
                 # Verify we have files to process
                 if not image_paths:
                     return {'error': 'No valid files were uploaded or downloaded'}, 400
