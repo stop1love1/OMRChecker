@@ -493,6 +493,22 @@ def setup_routes(app):
                     
                     # Process OMR sheets
                     task.update_progress("omr_scanning", 80, f"Scanning OMR sheets")
+
+                    # Add pre-processing stage
+                    task.update_progress("omr_preprocessing", 81, f"Pre-processing images for OMR recognition")
+                    
+                    # Add marker detection stage
+                    task.update_progress("marker_detection", 82, f"Detecting markers in images")
+                    
+                    # Add alignment stage
+                    task.update_progress("image_alignment", 83, f"Aligning images with template")
+                    
+                    # Add bubble detection stage
+                    task.update_progress("bubble_detection", 85, f"Detecting and analyzing bubbles")
+                    
+                    # Add scoring stage
+                    task.update_progress("scoring", 88, f"Calculating scores from detected marks")
+                    
                     results = process_dir(
                         root_dir,
                         curr_dir,
@@ -510,6 +526,9 @@ def setup_routes(app):
                     
                     results_file = list(output_dir_path.glob('**/CheckedOMRs/*.csv'))
                     
+                    # Add results file search stage
+                    task.update_progress("locating_results", 91, f"Locating result files")
+                    
                     if not results_file:
                         results_file = list(output_dir_path.glob('**/Results/*.csv'))
                     
@@ -523,13 +542,16 @@ def setup_routes(app):
                         else:
                             results_file = all_csv_files
                     
+                    # Add data extraction stage
+                    task.update_progress("extracting_data", 92, f"Extracting data from result files")
+                    
                     if not results_file:
                         task.fail('Processing failed - no results generated')
                         return
                     
                     csv_file_path = results_file[0]
                     
-                    task.update_progress("preparing_results", 95, f"Reading results from {csv_file_path.name}")
+                    task.update_progress("preparing_results", 93, f"Reading results from {csv_file_path.name}")
                     df = pd.read_csv(csv_file_path, dtype={'studentId': str, 'code': str})
                     
                     df = force_string_conversion(df, ['studentId', 'code'])
@@ -556,72 +578,104 @@ def setup_routes(app):
                                 logger.warning(f"Error copying file {file}: {str(copy_error)}")
                     
                     task.update_progress("processing_images", 98, f"Processing result images")
+                    
+                    # Add image counting stage
+                    total_result_images = len(results_data)
+                    task.update_progress("counting_images", 98.2, f"Found {total_result_images} result images to process")
+                    
+                    # Process images in batches
+                    batch_size = min(10, max(1, total_result_images // 5))
+                    total_batches = math.ceil(total_result_images / batch_size)
+                    task.update_progress("image_batching", 98.3, f"Processing images in {total_batches} batches")
+                    
                     clean_results = []
-                    for result in results_data:
-                        clean_result = clean_nan_values(result)
-                        transformed_result = transform_result_format(clean_result)
+                    for batch_idx, batch_start in enumerate(range(0, total_result_images, batch_size)):
+                        batch_end = min(batch_start + batch_size, total_result_images)
+                        batch_results = results_data[batch_start:batch_end]
                         
-                        # Find input and output image paths
-                        input_image_path = None
-                        output_image_path = None
+                        batch_progress = 98.3 + (batch_idx / total_batches * 0.6)
+                        task.update_progress("batch_processing", batch_progress, 
+                                            f"Processing image batch {batch_idx+1}/{total_batches} ({batch_start+1}-{batch_end}/{total_result_images})")
                         
-                        if 'input_path' in clean_result:
-                            input_image_path = clean_result['input_path']
-                            # Verify the path exists and is valid
-                            if input_image_path and not os.path.exists(input_image_path):
-                                logger.warning(f"Input image path does not exist: {input_image_path}")
-                                input_image_path = None
-                        elif 'file_id' in clean_result:
-                            file_id = clean_result['file_id']
-                            for img_path in image_paths:
-                                if os.path.basename(img_path) == file_id:
-                                    input_image_path = img_path
-                                    break
+                        for result in batch_results:
+                            clean_result = clean_nan_values(result)
+                            transformed_result = transform_result_format(clean_result)
                             
-                            if not input_image_path:
-                                logger.warning(f"Could not find image for file_id: {file_id}")
-                        
-                        if 'output_path' in clean_result:
-                            output_image_path = clean_result['output_path']
-                            # Verify the path exists and is valid
-                            if output_image_path and not os.path.exists(output_image_path):
-                                logger.warning(f"Output image path does not exist: {output_image_path}")
-                                output_image_path = None
-                        
-                        # Save images to public directory and add URLs to result
-                        public_input_image = None
-                        public_output_image = None
-                        
-                        # Ensure public images directory exists
-                        os.makedirs(app_config['PUBLIC_IMAGES_DIR_ABS'], exist_ok=True)
-                        
-                        if input_image_path and os.path.exists(input_image_path):
-                            public_input_image = save_to_public_images(
-                                input_image_path, 
-                                "input", 
-                                app_config['API_HOST'], 
-                                app_config['PUBLIC_IMAGES_DIR_ABS']
-                            )
-                            if public_input_image:
-                                transformed_result['input_image_url'] = public_input_image
-                        
-                        if output_image_path and os.path.exists(output_image_path):
-                            public_output_image = save_to_public_images(
-                                output_image_path, 
-                                "output", 
-                                app_config['API_HOST'], 
-                                app_config['PUBLIC_IMAGES_DIR_ABS']
-                            )
-                            if public_output_image:
-                                transformed_result['output_image_url'] = public_output_image
-                        
-                        clean_results.append(transformed_result)
+                            # Find input and output image paths
+                            input_image_path = None
+                            output_image_path = None
+                            
+                            if 'input_path' in clean_result:
+                                input_image_path = clean_result['input_path']
+                                # Verify the path exists and is valid
+                                if input_image_path and not os.path.exists(input_image_path):
+                                    logger.warning(f"Input image path does not exist: {input_image_path}")
+                                    input_image_path = None
+                            elif 'file_id' in clean_result:
+                                file_id = clean_result['file_id']
+                                for img_path in image_paths:
+                                    if os.path.basename(img_path) == file_id:
+                                        input_image_path = img_path
+                                        break
+                                
+                                if not input_image_path:
+                                    logger.warning(f"Could not find image for file_id: {file_id}")
+                            
+                            if 'output_path' in clean_result:
+                                output_image_path = clean_result['output_path']
+                                # Verify the path exists and is valid
+                                if output_image_path and not os.path.exists(output_image_path):
+                                    logger.warning(f"Output image path does not exist: {output_image_path}")
+                                    output_image_path = None
+                            
+                            # Save images to public directory and add URLs to result
+                            public_input_image = None
+                            public_output_image = None
+                            
+                            # Ensure public images directory exists
+                            os.makedirs(app_config['PUBLIC_IMAGES_DIR_ABS'], exist_ok=True)
+                            
+                            if input_image_path and os.path.exists(input_image_path):
+                                public_input_image = save_to_public_images(
+                                    input_image_path, 
+                                    "input", 
+                                    app_config['API_HOST'], 
+                                    app_config['PUBLIC_IMAGES_DIR_ABS']
+                                )
+                                if public_input_image:
+                                    transformed_result['input_image_url'] = public_input_image
+                            
+                            if output_image_path and os.path.exists(output_image_path):
+                                public_output_image = save_to_public_images(
+                                    output_image_path, 
+                                    "output", 
+                                    app_config['API_HOST'], 
+                                    app_config['PUBLIC_IMAGES_DIR_ABS']
+                                )
+                                if public_output_image:
+                                    transformed_result['output_image_url'] = public_output_image
+                            
+                            clean_results.append(transformed_result)
                     
                     end_time = time.time()
                     total_processing_time = end_time - omr_start_time
                     logger.info(f"Total processing completed in {total_processing_time:.2f} seconds")
                     
                     task.update_progress("finalizing", 99, f"Finalizing results")
+                    
+                    # Add statistics calculation stage
+                    task.update_progress("calculating_stats", 99.2, f"Calculating result statistics")
+                    
+                    # Count various statistics about the results
+                    total_processed = len(clean_results)
+                    results_with_images = sum(1 for r in clean_results if 'input_image_url' in r or 'output_image_url' in r)
+                    
+                    # Add results formatting stage
+                    task.update_progress("formatting_results", 99.4, f"Formatting {total_processed} results ({results_with_images} with images)")
+                    
+                    # Add response preparation stage  
+                    task.update_progress("preparing_response", 99.6, f"Preparing response data")
+                    
                     response_data = {
                         'message': 'OMR processing completed successfully',
                         'result_id': result_id,
@@ -632,8 +686,16 @@ def setup_routes(app):
                         'timing': {
                             'total_processing': round(total_processing_time, 2)
                         },
+                        'statistics': {
+                            'total_processed': total_processed,
+                            'with_images': results_with_images,
+                            'processing_time_seconds': round(total_processing_time, 2)
+                        },
                         'results': clean_results
                     }
+                    
+                    # Add completion stage
+                    task.update_progress("wrapping_up", 99.8, f"Wrapping up processing after {round(total_processing_time, 2)} seconds")
                     
                     # Update task result
                     task.complete(response_data)
