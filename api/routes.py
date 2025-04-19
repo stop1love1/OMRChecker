@@ -14,7 +14,7 @@ import pandas as pd
 import requests
 import cv2
 
-from flask import send_file, send_from_directory, Blueprint, url_for, request
+from flask import send_file, send_from_directory, Blueprint, url_for, request, current_app
 from flask_restx import Api, Resource
 from flask_swagger_ui import get_swaggerui_blueprint
 from werkzeug.utils import secure_filename
@@ -56,6 +56,8 @@ class Task:
         self.stage_details = ""
         self.estimated_remaining_time = None
         self.last_updated = time.time()
+        self.results_fetched = 0  # Track how many results have been fetched
+        self.temp_file_path = None  # Path to temp file with results
     
     def update_progress(self, stage, progress, details="", increment_processed=0):
         """Update task progress with stage information"""
@@ -85,6 +87,35 @@ class Task:
         self.current_stage = "completed"
         self.stage_progress = 100
         self.estimated_remaining_time = 0
+        
+        # Save results to a temporary file
+        try:
+            # Use app.config if available, otherwise fallback to default path
+            if current_app:
+                temp_dir = current_app.config.get('TMP_DIR')
+            if not temp_dir:
+                temp_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "tmp")
+            
+            os.makedirs(temp_dir, exist_ok=True)
+            
+            self.temp_file_path = os.path.join(temp_dir, f"task_results_{self.task_id}.json")
+            
+            # Store the full results in the temp file
+            with open(self.temp_file_path, 'w', encoding='utf-8') as f:
+                json.dump(result, f, cls=CustomJSONEncoder)
+            
+            # Keep only basic info in memory
+            result_copy = result.copy()
+            if 'results' in result_copy:
+                result_copy['results'] = []  # Clear results array to save memory
+                result_copy['total_results'] = len(result['results'])
+            self.result = result_copy
+            
+            logger.info(f"Saved complete task results to temporary file: {self.temp_file_path}")
+        except Exception as e:
+            logger.error(f"Failed to save task results to temporary file: {str(e)}")
+            # Keep full results in memory if saving to file fails
+            self.result = result
         
     def fail(self, error_message):
         """Mark task as failed with error message"""
@@ -128,7 +159,12 @@ def setup_routes(app):
     os.makedirs(app.config['OUTPUTS_DIR_ABS'], exist_ok=True)
     os.makedirs(app.config['PROCESSED_DIR'], exist_ok=True)
     os.makedirs(app.config['PUBLIC_IMAGES_DIR_ABS'], exist_ok=True)
-    logger.info(f"Ensured all required directories exist")
+    
+    # Create tmp directory for temporary task results
+    tmp_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "tmp")
+    os.makedirs(tmp_dir, exist_ok=True)
+    app.config['TMP_DIR'] = tmp_dir
+    logger.info(f"Ensured all required directories exist, including tmp: {tmp_dir}")
     
     # Create API blueprint
     blueprint = Blueprint('api', __name__, url_prefix='/api')
@@ -896,7 +932,19 @@ def setup_routes(app):
                     404: 'Task not found'
                 })
         def get(self, task_id):
-            """Get status of a specific OMR processing task and delete it from memory"""
+            """Get status of a specific OMR processing task and results with pagination"""
+            # Parse parameters for pagination
+            page = request.args.get('page', default=1, type=int)
+            page_size = request.args.get('page_size', default=10, type=int)
+            
+            # Validate page and page_size
+            if page < 1:
+                page = 1
+            if page_size < 1:
+                page_size = 10
+            if page_size > 100:
+                page_size = 100
+                
             if task_id not in tasks:
                 return {'error': 'Task not found'}, 404
             
@@ -913,7 +961,9 @@ def setup_routes(app):
                 'current_stage': task.current_stage,
                 'stage_progress': task.stage_progress,
                 'stage_details': task.stage_details,
-                'last_updated': task.last_updated
+                'last_updated': task.last_updated,
+                'page': page,
+                'page_size': page_size
             }
             
             if task.estimated_remaining_time is not None:
@@ -926,22 +976,79 @@ def setup_routes(app):
                 else:
                     response['estimated_remaining'] = f"{seconds}s"
             
+            # For completed tasks, handle results with pagination
             if task.status == TaskStatusEnum.COMPLETED:
-                response['result'] = task.result
+                # Remove full results array from response
+                if 'result' in response:
+                    del response['result']
+                
+                # Get basic task result info (without the large results array)
+                response.update(task.result)
+                
+                # Calculate total pages
+                total_results = task.result.get('total_results', 0)
+                total_pages = math.ceil(total_results / page_size) if total_results > 0 else 0
+                response['total_pages'] = total_pages
+                
+                # If temp file exists, read paginated results from it
+                if task.temp_file_path and os.path.exists(task.temp_file_path):
+                    try:
+                        with open(task.temp_file_path, 'r', encoding='utf-8') as f:
+                            full_result = json.load(f)
+                            
+                        if 'results' in full_result:
+                            # Calculate pagination
+                            start_idx = (page - 1) * page_size
+                            end_idx = start_idx + page_size
+                            
+                            # Get paginated results
+                            if start_idx < len(full_result['results']):
+                                response['results'] = full_result['results'][start_idx:end_idx]
+                                
+                                # Update how many results have been fetched
+                                task.results_fetched = max(task.results_fetched, end_idx)
+                                
+                                # Add pagination info to response
+                                response['pagination'] = {
+                                    'page': page,
+                                    'page_size': page_size,
+                                    'total_results': total_results,
+                                    'total_pages': total_pages,
+                                    'has_next': page < total_pages,
+                                    'has_prev': page > 1
+                                }
+                            else:
+                                response['results'] = []
+                                response['message'] = f"Page {page} exceeds available results"
+                            
+                            # Only delete the task and temp file if we've fetched all results and we're on the last page
+                            if task.results_fetched >= total_results and page >= total_pages:
+                                logger.info(f"All results fetched for task {task_id}, cleaning up")
+                                
+                                # Delete the temp file
+                                try:
+                                    os.remove(task.temp_file_path)
+                                    logger.info(f"Deleted temp file: {task.temp_file_path}")
+                                except Exception as e:
+                                    logger.warning(f"Failed to delete temp file: {str(e)}")
+                                
+                                # Delete the task from memory
+                                del tasks[task_id]
+                                response['message'] = 'All results retrieved, task data removed from memory'
+                    except Exception as e:
+                        logger.error(f"Error reading task results from temp file: {str(e)}")
+                        response['error'] = f"Error reading results: {str(e)}"
+                
                 response['completed_at'] = task.end_time
                 response['processing_time'] = round(task.end_time - task.start_time, 2) if task.start_time else None
             
             if task.status == TaskStatusEnum.FAILED:
                 response['error'] = task.error
                 response['failed_at'] = task.end_time
-            
-            # Only delete task if the processing is finished
-            if task.status in [TaskStatusEnum.COMPLETED, TaskStatusEnum.FAILED]:
-                # Delete the task from memory
-                logger.info(f"Deleting task {task_id} from memory after retrieval")
+                
+                # Delete failed tasks immediately
                 del tasks[task_id]
-                # We don't delete from disk because we might need the result_id to access results later
-                response['message'] = 'Task data removed from memory after retrieval'
+                response['message'] = 'Task data removed from memory due to failure'
             
             return response, 200
 
