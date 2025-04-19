@@ -26,7 +26,7 @@ from src.logger import logger
 
 from utils.validators import validate_directory_name, clean_nan_values, force_string_conversion
 from utils.file_handling import transform_result_format, save_to_public_images, clean_all_folders, download_file_from_url, clean_old_files
-from utils.image_processing import process_pdf, validate_image, safe_resize
+from utils.image_processing import process_pdf, validate_image
 from api.models import setup_models
 from api.parsers import setup_parsers
 
@@ -96,22 +96,55 @@ class Task:
             if not temp_dir:
                 temp_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "tmp")
             
+            # Ensure directory exists
             os.makedirs(temp_dir, exist_ok=True)
             
-            self.temp_file_path = os.path.join(temp_dir, f"task_results_{self.task_id}.json")
+            # Generate a shorter filename to avoid path length issues
+            short_task_id = self.task_id[:8]  # Sử dụng 8 ký tự đầu của task_id để rút ngắn tên file
+            self.temp_file_path = os.path.join(temp_dir, f"{short_task_id}.json")
             
-            # Store the full results in the temp file
-            with open(self.temp_file_path, 'w', encoding='utf-8') as f:
-                json.dump(result, f, cls=CustomJSONEncoder)
+            # Attempt to store the full results in the temp file
+            try:
+                # Add metadata to help identify the file
+                result_with_meta = result.copy()
+                result_with_meta['_meta'] = {
+                    'task_id': self.task_id,
+                    'saved_at': time.time(),
+                    'directory_name': self.directory_name
+                }
+                
+                with open(self.temp_file_path, 'w', encoding='utf-8') as f:
+                    json.dump(result_with_meta, f, cls=CustomJSONEncoder)
+                
+                # Keep only basic info in memory
+                result_copy = result.copy()
+                if 'results' in result_copy:
+                    # Store total results count before clearing
+                    total_results = len(result['results'])
+                    result_copy['results'] = []  # Clear results array to save memory
+                    result_copy['total_results'] = total_results
+                self.result = result_copy
+                
+                logger.info(f"Saved complete task results to temporary file: {self.temp_file_path}")
+            except json.JSONEncodeError as json_error:
+                logger.error(f"JSON encoding error: {str(json_error)}")
+                # Try to save without problematic fields
+                if 'results' in result:
+                    for i, res in enumerate(result['results']):
+                        if 'input_image_url' in res:
+                            del res['input_image_url']
+                        if 'output_image_url' in res:
+                            del res['output_image_url']
+                    
+                    with open(self.temp_file_path, 'w', encoding='utf-8') as f:
+                        json.dump(result, f, cls=CustomJSONEncoder)
+                    
+                    logger.info(f"Saved simplified results to temporary file after encoding error")
+                else:
+                    # Keep full results in memory if saving to file fails completely
+                    self.result = result
+                    logger.error(f"Could not save results to temp file - keeping in memory")
             
-            # Keep only basic info in memory
-            result_copy = result.copy()
-            if 'results' in result_copy:
-                result_copy['results'] = []  # Clear results array to save memory
-                result_copy['total_results'] = len(result['results'])
-            self.result = result_copy
-            
-            logger.info(f"Saved complete task results to temporary file: {self.temp_file_path}")
         except Exception as e:
             logger.error(f"Failed to save task results to temporary file: {str(e)}")
             # Keep full results in memory if saving to file fails
@@ -603,17 +636,51 @@ def setup_routes(app):
                     
                     # Copy results to permanent storage
                     task.update_progress("saving_results", 97, f"Saving result files")
+                    copied_files = 0
+                    skipped_files = 0
+                    
                     for file in output_dir_path.glob('**/*'):
                         if file.is_file():
                             try:
                                 rel_path = file.relative_to(output_dir_path)
                                 target_path = result_dir / rel_path
-                                os.makedirs(os.path.dirname(target_path), exist_ok=True)
-                                shutil.copy2(file, target_path)
-                            except Exception as copy_error:
-                                logger.warning(f"Error copying file {file}: {str(copy_error)}")
+                                
+                                # Xử lý đường dẫn dài trên Windows
+                                source_path_str = str(file)
+                                target_path_str = str(target_path)
+                                
+                                # Sử dụng đường dẫn UNC cho Windows nếu đường dẫn quá dài
+                                if os.name == 'nt' and (len(source_path_str) > 250 or len(target_path_str) > 250):
+                                    if not source_path_str.startswith("\\\\?\\"):
+                                        source_path_str = "\\\\?\\" + os.path.abspath(source_path_str)
+                                    if not target_path_str.startswith("\\\\?\\"):
+                                        target_path_str = "\\\\?\\" + os.path.abspath(target_path_str)
+                                
+                                # Đảm bảo thư mục đích tồn tại
+                                os.makedirs(os.path.dirname(target_path_str), exist_ok=True)
+                                
+                                # Sao chép file với các đường dẫn đã xử lý
+                                try:
+                                    shutil.copy2(source_path_str, target_path_str)
+                                    copied_files += 1
+                                except (OSError, IOError) as copy_error:
+                                    # Thử phương pháp khác nếu phương pháp đầu tiên thất bại
+                                    try:
+                                        # Đọc và ghi thủ công
+                                        with open(source_path_str, 'rb') as src_file:
+                                            with open(target_path_str, 'wb') as dst_file:
+                                                dst_file.write(src_file.read())
+                                        copied_files += 1
+                                        logger.info(f"Successfully copied file using manual read/write: {rel_path}")
+                                    except Exception as manual_error:
+                                        logger.warning(f"Error copying file using all methods {rel_path}: {str(manual_error)}")
+                                        skipped_files += 1
+                            except Exception as path_error:
+                                logger.warning(f"Error with file path {file}: {str(path_error)}")
+                                skipped_files += 1
                     
-                    task.update_progress("processing_images", 98, f"Processing result images")
+                    logger.info(f"Copied {copied_files} files, skipped {skipped_files} files")
+                    task.update_progress("processing_images", 98, f"Processing result images, copied {copied_files} files")
                     
                     # Add image counting stage
                     total_result_images = len(results_data)
@@ -672,24 +739,42 @@ def setup_routes(app):
                             os.makedirs(app_config['PUBLIC_IMAGES_DIR_ABS'], exist_ok=True)
                             
                             if input_image_path and os.path.exists(input_image_path):
-                                public_input_image = save_to_public_images(
-                                    input_image_path, 
-                                    "input", 
-                                    app_config['API_HOST'], 
-                                    app_config['PUBLIC_IMAGES_DIR_ABS']
-                                )
-                                if public_input_image:
-                                    transformed_result['input_image_url'] = public_input_image
+                                try:
+                                    # Xử lý đường dẫn dài trên Windows
+                                    if os.name == 'nt' and len(input_image_path) > 250:
+                                        input_image_path_unc = "\\\\?\\" + os.path.abspath(input_image_path)
+                                    else:
+                                        input_image_path_unc = input_image_path
+                                        
+                                    public_input_image = save_to_public_images(
+                                        input_image_path_unc, 
+                                        "input", 
+                                        app_config['API_HOST'], 
+                                        app_config['PUBLIC_IMAGES_DIR_ABS']
+                                    )
+                                    if public_input_image:
+                                        transformed_result['input_image_url'] = public_input_image
+                                except Exception as e:
+                                    logger.warning(f"Error saving input image to public folder: {str(e)}")
                             
                             if output_image_path and os.path.exists(output_image_path):
-                                public_output_image = save_to_public_images(
-                                    output_image_path, 
-                                    "output", 
-                                    app_config['API_HOST'], 
-                                    app_config['PUBLIC_IMAGES_DIR_ABS']
-                                )
-                                if public_output_image:
-                                    transformed_result['output_image_url'] = public_output_image
+                                try:
+                                    # Xử lý đường dẫn dài trên Windows
+                                    if os.name == 'nt' and len(output_image_path) > 250:
+                                        output_image_path_unc = "\\\\?\\" + os.path.abspath(output_image_path)
+                                    else:
+                                        output_image_path_unc = output_image_path
+                                        
+                                    public_output_image = save_to_public_images(
+                                        output_image_path_unc, 
+                                        "output", 
+                                        app_config['API_HOST'], 
+                                        app_config['PUBLIC_IMAGES_DIR_ABS']
+                                    )
+                                    if public_output_image:
+                                        transformed_result['output_image_url'] = public_output_image
+                                except Exception as e:
+                                    logger.warning(f"Error saving output image to public folder: {str(e)}")
                             
                             clean_results.append(transformed_result)
                     
