@@ -53,7 +53,7 @@ PERFORMANCE_TUNING = {
     "show_image_level": 0,
     "dpi": None,
     "quality": None,
-    "processing_width": 800,
+    "processing_width": 1200,
 }
 
 ULTRA_FAST = {
@@ -63,7 +63,7 @@ ULTRA_FAST = {
     "show_image_level": 0,
     "dpi": None,
     "quality": None,
-    "processing_width": 800,
+    "processing_width": 1200,
 }
 
 HIGH_QUALITY = {
@@ -73,7 +73,7 @@ HIGH_QUALITY = {
     "show_image_level": 0,
     "dpi": None,
     "quality": None,
-    "processing_width": 800,
+    "processing_width": 1200,
 }
 
 MEMORY_MANAGEMENT = {
@@ -112,7 +112,7 @@ def get_batch_profile(batch_size, high_speed=False, high_quality=True):
             "show_image_level": 0,
             "dpi": None,
             "quality": None,
-            "processing_width": 800,
+            "processing_width": 1200,
         }
     
     return PERFORMANCE_TUNING
