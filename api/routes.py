@@ -474,9 +474,8 @@ def setup_routes(app):
                             
                             batch_profile = get_batch_profile(pdf_count)
                             
-                            # Tăng DPI và quality lên cao nhất cho độ nét tốt nhất
-                            high_dpi = 400  # Giá trị DPI cao hơn cho độ nét tốt
-                            high_quality = 100  # Giá trị quality cao hơn (max 100)
+                            high_dpi = 600
+                            high_quality = 100
                             
                             pdf_results = process_pdf_batch(
                                 pdf_files, 
@@ -511,12 +510,11 @@ def setup_routes(app):
                                     individual_progress = 60 + (i / pdf_count * 10)
                                     task.update_progress("pdf_processing", individual_progress, f"Processing PDF {i+1}/{pdf_count}")
                                     
-                                    # Tăng DPI và quality cho xử lý từng PDF riêng lẻ
                                     new_image_paths = process_pdf(
                                         pdf_path, 
                                         input_dir,
-                                        dpi=400,  # Tăng DPI từ 100 lên 300
-                                        quality=100,  # Tăng chất lượng từ 70 lên 95
+                                        dpi=600,
+                                        quality=100,
                                         max_workers=12
                                     )
                                     image_paths.extend(new_image_paths)
