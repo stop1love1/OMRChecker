@@ -474,11 +474,15 @@ def setup_routes(app):
                             
                             batch_profile = get_batch_profile(pdf_count)
                             
+                            # Tăng DPI và quality lên cao nhất cho độ nét tốt nhất
+                            high_dpi = 400  # Giá trị DPI cao hơn cho độ nét tốt
+                            high_quality = 100  # Giá trị quality cao hơn (max 100)
+                            
                             pdf_results = process_pdf_batch(
                                 pdf_files, 
                                 input_dir,
-                                dpi=batch_profile["dpi"],
-                                quality=batch_profile["quality"]
+                                dpi=high_dpi,
+                                quality=high_quality
                             )
                             
                             extracted_images = 0
@@ -507,11 +511,12 @@ def setup_routes(app):
                                     individual_progress = 60 + (i / pdf_count * 10)
                                     task.update_progress("pdf_processing", individual_progress, f"Processing PDF {i+1}/{pdf_count}")
                                     
+                                    # Tăng DPI và quality cho xử lý từng PDF riêng lẻ
                                     new_image_paths = process_pdf(
                                         pdf_path, 
                                         input_dir,
-                                        dpi=100,
-                                        quality=70,
+                                        dpi=400,  # Tăng DPI từ 100 lên 300
+                                        quality=100,  # Tăng chất lượng từ 70 lên 95
                                         max_workers=12
                                     )
                                     image_paths.extend(new_image_paths)
@@ -1487,15 +1492,21 @@ def setup_routes(app):
                         
                         batch_profile = get_batch_profile(len(pdf_files))
                         
+                        # Tăng DPI và quality lên cao nhất cho độ nét tốt nhất
+                        high_dpi = 300  # Giá trị DPI cao hơn cho độ nét tốt
+                        high_quality = 95  # Giá trị quality cao hơn (max 100)
+                        
                         pdf_results = process_pdf_batch(
                             pdf_files, 
                             input_dir,
-                            dpi=batch_profile["dpi"],
-                            quality=batch_profile["quality"]
+                            dpi=high_dpi,
+                            quality=high_quality
                         )
                         
+                        extracted_images = 0
                         for pdf_path, paths in pdf_results.items():
                             image_paths.extend(paths)
+                            extracted_images += len(paths)
                             
                             try:
                                 os.remove(pdf_path)
@@ -1503,19 +1514,22 @@ def setup_routes(app):
                                 logger.warning(f"Could not remove PDF file {pdf_path}: {str(rm_error)}")
                         
                         pdf_total_time = time.time() - pdf_start_time
-                        logger.info(f"Batch PDF processing completed in {pdf_total_time:.2f} seconds")
+                        logger.info(f"Batch PDF processing completed in {pdf_total_time:.2f} seconds for {len(pdf_files)} PDFs")
+                        task.update_progress("pdf_processing", 70, f"Extracted {extracted_images} images from {len(pdf_files)} PDF files")
                         
                     except Exception as batch_error:
                         logger.error(f"Error in batch PDF processing: {str(batch_error)}")
                         logger.info("Falling back to individual PDF processing")
+                        task.update_progress("pdf_processing", 60, f"Batch processing failed, falling back to individual processing")
                         
                         for pdf_path in pdf_files:
                             try:
                                 new_image_paths = process_pdf(
                                     pdf_path, 
                                     input_dir,
-                                    dpi=100,
-                                    quality=70
+                                    dpi=300,  # Tăng DPI từ 100 lên 300
+                                    quality=95,  # Tăng chất lượng từ 70 lên 95
+                                    max_workers=12
                                 )
                                 image_paths.extend(new_image_paths)
                                 
