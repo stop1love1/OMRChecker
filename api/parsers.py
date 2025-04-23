@@ -59,6 +59,11 @@ def setup_parsers():
                               required=False,
                               default=50,
                               help='Number of files per batch for batch processing')
+    upload_parser.add_argument('use_cli', 
+                              type=inputs.boolean, 
+                              required=False,
+                              default=True,
+                              help='Use CLI command (True) or direct function call (False)')
 
     get_params_parser = reqparse.RequestParser()
     get_params_parser.add_argument('directory_name', 

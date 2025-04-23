@@ -498,7 +498,8 @@ def setup_routes(app):
                             
                             pdf_total_time = time.time() - pdf_start_time
                             logger.info(f"Batch PDF processing completed in {pdf_total_time:.2f} seconds for {pdf_count} PDFs")
-                            task.update_progress("pdf_processing", 70, f"Extracted {extracted_images} images from {pdf_count} PDF files")
+                            # No task object in batch processing
+                            # task.update_progress("pdf_processing", 70, f"Extracted {extracted_images} images from {pdf_count} PDF files")
                             
                         except Exception as batch_error:
                             logger.error(f"Error in batch PDF processing: {str(batch_error)}")
@@ -535,7 +536,13 @@ def setup_routes(app):
                         task.fail('No valid images to process')
                         return
                                     
-                    task.update_progress("omr_processing", 75, f"Starting OMR processing for {len(image_paths)} images")                
+                    # Check if we should use CLI or direct function call
+                    use_cli = args.get('use_cli', True)
+                    if isinstance(use_cli, str):
+                        use_cli = use_cli.lower() == 'true'
+                    
+                    task.update_progress("omr_processing", 75, f"Starting OMR processing for {len(image_paths)} images")
+                    
                     api_args = {
                         'input_paths': [input_dir],
                         'output_dir': app_config['OUTPUTS_DIR_ABS'],
@@ -559,13 +566,9 @@ def setup_routes(app):
                         tuning_config.outputs.show_image_level = 0
                     
                     # Tăng độ nhạy cho các trường hợp tô mờ
-                    # Giảm MIN_JUMP để nhận diện các sự thay đổi mức độ màu sắc nhỏ hơn
                     tuning_config.threshold_params.MIN_JUMP = 15  # Giảm từ 25 xuống 15
-                    # Giảm MIN_GAP để chấp nhận khoảng cách nhỏ hơn giữa các giá trị cường độ
                     tuning_config.threshold_params.MIN_GAP = 20   # Giảm từ 30 xuống 20
-                    # Tăng GAMMA_LOW để làm rõ nét các mục tô mờ
                     tuning_config.threshold_params.GAMMA_LOW = 0.6  # Giảm từ 0.7 xuống 0.6
-                    # Tăng CONFIDENT_SURPLUS để có nhiều khả năng nhận diện hơn
                     tuning_config.threshold_params.CONFIDENT_SURPLUS = 3  # Giảm từ 5 xuống 3
                     
                     template = Template(Path(template_path), tuning_config)
@@ -575,52 +578,84 @@ def setup_routes(app):
                     
                     omr_start_time = time.time()
                     
-                    task.update_progress("omr_scanning", 80, f"Scanning OMR sheets using CLI")
-                    
                     output_path = os.path.join(app_config['OUTPUTS_DIR_ABS'], directory_name)
                     
-                    cmd = [
-                        sys.executable,
-                        "main.py", 
-                        "-i", str(curr_dir),
-                        "-o", output_path,
-                        "--debug"
-                    ]
-                    
-                    logger.info(f"Executing command: {' '.join(cmd)}")
-                    
-                    try:
-                        process = subprocess.Popen(
-                            cmd,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE,
-                            universal_newlines=True
-                        )
+                    if use_cli:
+                        # Method 1: Run using CLI command (subprocess)
+                        task.update_progress("omr_scanning", 80, f"Scanning OMR sheets using CLI")
                         
+                        cmd = [
+                            sys.executable,
+                            "main.py", 
+                            "-i", str(curr_dir),
+                            "-o", output_path,
+                            "--debug"
+                        ]
+                        
+                        logger.info(f"Executing command: {' '.join(cmd)}")
+                        
+                        try:
+                            process = subprocess.Popen(
+                                cmd,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE,
+                                universal_newlines=True
+                            )
+                            
+                            task.update_progress("omr_preprocessing", 81, f"Pre-processing images for OMR recognition")
+                            task.update_progress("marker_detection", 82, f"Detecting markers in images")
+                            task.update_progress("image_alignment", 83, f"Aligning images with template")
+                            task.update_progress("bubble_detection", 85, f"Detecting and analyzing bubbles")
+                            task.update_progress("scoring", 88, f"Calculating scores from detected marks")
+                            
+                            stdout, stderr = process.communicate()
+                            
+                            if process.returncode != 0:
+                                logger.error(f"OMR processing failed with error: {stderr}")
+                                task.fail(f"OMR processing command failed: {stderr}")
+                                return
+                                
+                            logger.info(f"OMR processing completed via CLI command")
+                            
+                            results = {
+                                "status": "success",
+                                "command": " ".join(cmd),
+                                "method": "cli",
+                                "output": stdout
+                            }
+                        except Exception as cmd_error:
+                            logger.error(f"Error executing OMR command: {str(cmd_error)}")
+                            task.fail(f"Error executing OMR command: {str(cmd_error)}")
+                            return
+                    else:
+                        # Method 2: Run using process_dir function directly
+                        task.update_progress("omr_scanning", 80, f"Scanning OMR sheets using direct function")
                         task.update_progress("omr_preprocessing", 81, f"Pre-processing images for OMR recognition")
                         task.update_progress("marker_detection", 82, f"Detecting markers in images")
                         task.update_progress("image_alignment", 83, f"Aligning images with template")
                         task.update_progress("bubble_detection", 85, f"Detecting and analyzing bubbles")
                         task.update_progress("scoring", 88, f"Calculating scores from detected marks")
                         
-                        stdout, stderr = process.communicate()
-                        
-                        if process.returncode != 0:
-                            logger.error(f"OMR processing failed with error: {stderr}")
-                            task.fail(f"OMR processing command failed: {stderr}")
-                            return
+                        try:
+                            # Call process_dir directly
+                            results = process_dir(
+                                root_dir,
+                                curr_dir,
+                                api_args,
+                                template=template,
+                                tuning_config=tuning_config
+                            )
                             
-                        logger.info(f"OMR processing completed via CLI command")
-                        
-                        results = {
-                            "status": "success",
-                            "command": " ".join(cmd),
-                            "output": stdout
-                        }
-                    except Exception as cmd_error:
-                        logger.error(f"Error executing OMR command: {str(cmd_error)}")
-                        task.fail(f"Error executing OMR command: {str(cmd_error)}")
-                        return
+                            # Initialize results as a dict if None
+                            if results is None:
+                                results = {"status": "success"}
+                                
+                            results["method"] = "direct"
+                            logger.info(f"OMR processing completed via direct function call")
+                        except Exception as func_error:
+                            logger.error(f"Error in process_dir function: {str(func_error)}")
+                            task.fail(f"Error in process_dir function: {str(func_error)}")
+                            return
                     
                     task.update_progress("results_processing", 90, f"Processing results")
                     
@@ -1518,7 +1553,8 @@ def setup_routes(app):
                         
                         pdf_total_time = time.time() - pdf_start_time
                         logger.info(f"Batch PDF processing completed in {pdf_total_time:.2f} seconds for {len(pdf_files)} PDFs")
-                        task.update_progress("pdf_processing", 70, f"Extracted {extracted_images} images from {len(pdf_files)} PDF files")
+                        # No task object in batch processing
+                        # task.update_progress("pdf_processing", 70, f"Extracted {extracted_images} images from {len(pdf_files)} PDF files")
                         
                     except Exception as batch_error:
                         logger.error(f"Error in batch PDF processing: {str(batch_error)}")
