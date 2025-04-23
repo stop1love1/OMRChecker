@@ -13,6 +13,8 @@ from pathlib import Path
 import pandas as pd
 import requests
 import cv2
+import subprocess
+import sys
 
 from flask import send_file, send_from_directory, Blueprint, url_for, request, current_app
 from flask_restx import Api, Resource
@@ -552,7 +554,7 @@ def setup_routes(app):
                         tuning_config.outputs.save_image_level = batch_profile["save_image_level"]
                         tuning_config.outputs.show_image_level = batch_profile["show_image_level"]
                     else:
-                        tuning_config.dimensions.processing_width = 800
+                        tuning_config.dimensions.processing_width = 1200
                         tuning_config.outputs.save_image_level = 0
                         tuning_config.outputs.show_image_level = 0
                     
@@ -563,33 +565,53 @@ def setup_routes(app):
                     
                     omr_start_time = time.time()
                     
-                    # Process OMR sheets
-                    task.update_progress("omr_scanning", 80, f"Scanning OMR sheets")
-
-                    # Add pre-processing stage
-                    task.update_progress("omr_preprocessing", 81, f"Pre-processing images for OMR recognition")
+                    task.update_progress("omr_scanning", 80, f"Scanning OMR sheets using CLI")
                     
-                    # Add marker detection stage
-                    task.update_progress("marker_detection", 82, f"Detecting markers in images")
+                    output_path = os.path.join(app_config['OUTPUTS_DIR_ABS'], directory_name)
                     
-                    # Add alignment stage
-                    task.update_progress("image_alignment", 83, f"Aligning images with template")
+                    cmd = [
+                        sys.executable,
+                        "main.py", 
+                        "-i", str(curr_dir),
+                        "-o", output_path,
+                        "--debug"
+                    ]
                     
-                    # Add bubble detection stage
-                    task.update_progress("bubble_detection", 85, f"Detecting and analyzing bubbles")
+                    logger.info(f"Executing command: {' '.join(cmd)}")
                     
-                    # Add scoring stage
-                    task.update_progress("scoring", 88, f"Calculating scores from detected marks")
+                    try:
+                        process = subprocess.Popen(
+                            cmd,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            universal_newlines=True
+                        )
+                        
+                        task.update_progress("omr_preprocessing", 81, f"Pre-processing images for OMR recognition")
+                        task.update_progress("marker_detection", 82, f"Detecting markers in images")
+                        task.update_progress("image_alignment", 83, f"Aligning images with template")
+                        task.update_progress("bubble_detection", 85, f"Detecting and analyzing bubbles")
+                        task.update_progress("scoring", 88, f"Calculating scores from detected marks")
+                        
+                        stdout, stderr = process.communicate()
+                        
+                        if process.returncode != 0:
+                            logger.error(f"OMR processing failed with error: {stderr}")
+                            task.fail(f"OMR processing command failed: {stderr}")
+                            return
+                            
+                        logger.info(f"OMR processing completed via CLI command")
+                        
+                        results = {
+                            "status": "success",
+                            "command": " ".join(cmd),
+                            "output": stdout
+                        }
+                    except Exception as cmd_error:
+                        logger.error(f"Error executing OMR command: {str(cmd_error)}")
+                        task.fail(f"Error executing OMR command: {str(cmd_error)}")
+                        return
                     
-                    results = process_dir(
-                        root_dir,
-                        curr_dir,
-                        api_args,
-                        template=template,
-                        tuning_config=tuning_config
-                    )
-                    
-                    # Update task progress to 90%
                     task.update_progress("results_processing", 90, f"Processing results")
                     
                     output_dir_path = Path(output_dir)
@@ -598,7 +620,6 @@ def setup_routes(app):
                     
                     results_file = list(output_dir_path.glob('**/CheckedOMRs/*.csv'))
                     
-                    # Add results file search stage
                     task.update_progress("locating_results", 91, f"Locating result files")
                     
                     if not results_file:
@@ -614,7 +635,6 @@ def setup_routes(app):
                         else:
                             results_file = all_csv_files
                     
-                    # Add data extraction stage
                     task.update_progress("extracting_data", 92, f"Extracting data from result files")
                     
                     if not results_file:
@@ -637,7 +657,6 @@ def setup_routes(app):
                     result_dir = Path(app_config['PROCESSED_DIR']) / result_id
                     os.makedirs(result_dir, exist_ok=True)
                     
-                    # Copy results to permanent storage
                     task.update_progress("saving_results", 97, f"Saving result files")
                     copied_files = 0
                     skipped_files = 0
@@ -648,28 +667,22 @@ def setup_routes(app):
                                 rel_path = file.relative_to(output_dir_path)
                                 target_path = result_dir / rel_path
                                 
-                                # Xử lý đường dẫn dài trên Windows
                                 source_path_str = str(file)
                                 target_path_str = str(target_path)
                                 
-                                # Sử dụng đường dẫn UNC cho Windows nếu đường dẫn quá dài
                                 if os.name == 'nt' and (len(source_path_str) > 250 or len(target_path_str) > 250):
                                     if not source_path_str.startswith("\\\\?\\"):
                                         source_path_str = "\\\\?\\" + os.path.abspath(source_path_str)
                                     if not target_path_str.startswith("\\\\?\\"):
                                         target_path_str = "\\\\?\\" + os.path.abspath(target_path_str)
                                 
-                                # Đảm bảo thư mục đích tồn tại
                                 os.makedirs(os.path.dirname(target_path_str), exist_ok=True)
                                 
-                                # Sao chép file với các đường dẫn đã xử lý
                                 try:
                                     shutil.copy2(source_path_str, target_path_str)
                                     copied_files += 1
                                 except (OSError, IOError) as copy_error:
-                                    # Thử phương pháp khác nếu phương pháp đầu tiên thất bại
                                     try:
-                                        # Đọc và ghi thủ công
                                         with open(source_path_str, 'rb') as src_file:
                                             with open(target_path_str, 'wb') as dst_file:
                                                 dst_file.write(src_file.read())
@@ -685,11 +698,9 @@ def setup_routes(app):
                     logger.info(f"Copied {copied_files} files, skipped {skipped_files} files")
                     task.update_progress("processing_images", 98, f"Processing result images, copied {copied_files} files")
                     
-                    # Add image counting stage
                     total_result_images = len(results_data)
                     task.update_progress("counting_images", 98.2, f"Found {total_result_images} result images to process")
                     
-                    # Process images in batches
                     batch_size = min(10, max(1, total_result_images // 5))
                     total_batches = math.ceil(total_result_images / batch_size)
                     task.update_progress("image_batching", 98.3, f"Processing images in {total_batches} batches")
@@ -707,13 +718,11 @@ def setup_routes(app):
                             clean_result = clean_nan_values(result)
                             transformed_result = transform_result_format(clean_result)
                             
-                            # Find input and output image paths
                             input_image_path = None
                             output_image_path = None
                             
                             if 'input_path' in clean_result:
                                 input_image_path = clean_result['input_path']
-                                # Verify the path exists and is valid
                                 if input_image_path and not os.path.exists(input_image_path):
                                     logger.warning(f"Input image path does not exist: {input_image_path}")
                                     input_image_path = None
@@ -729,21 +738,17 @@ def setup_routes(app):
                             
                             if 'output_path' in clean_result:
                                 output_image_path = clean_result['output_path']
-                                # Verify the path exists and is valid
                                 if output_image_path and not os.path.exists(output_image_path):
                                     logger.warning(f"Output image path does not exist: {output_image_path}")
                                     output_image_path = None
                             
-                            # Save images to public directory and add URLs to result
                             public_input_image = None
                             public_output_image = None
                             
-                            # Ensure public images directory exists
                             os.makedirs(app_config['PUBLIC_IMAGES_DIR_ABS'], exist_ok=True)
                             
                             if input_image_path and os.path.exists(input_image_path):
                                 try:
-                                    # Xử lý đường dẫn dài trên Windows
                                     if os.name == 'nt' and len(input_image_path) > 250:
                                         input_image_path_unc = "\\\\?\\" + os.path.abspath(input_image_path)
                                     else:
@@ -762,7 +767,6 @@ def setup_routes(app):
                             
                             if output_image_path and os.path.exists(output_image_path):
                                 try:
-                                    # Xử lý đường dẫn dài trên Windows
                                     if os.name == 'nt' and len(output_image_path) > 250:
                                         output_image_path_unc = "\\\\?\\" + os.path.abspath(output_image_path)
                                     else:
@@ -787,17 +791,13 @@ def setup_routes(app):
                     
                     task.update_progress("finalizing", 99, f"Finalizing results")
                     
-                    # Add statistics calculation stage
                     task.update_progress("calculating_stats", 99.2, f"Calculating result statistics")
                     
-                    # Count various statistics about the results
                     total_processed = len(clean_results)
                     results_with_images = sum(1 for r in clean_results if 'input_image_url' in r or 'output_image_url' in r)
                     
-                    # Add results formatting stage
                     task.update_progress("formatting_results", 99.4, f"Formatting {total_processed} results ({results_with_images} with images)")
                     
-                    # Add response preparation stage  
                     task.update_progress("preparing_response", 99.6, f"Preparing response data")
                     
                     response_data = {
@@ -818,10 +818,8 @@ def setup_routes(app):
                         'results': clean_results
                     }
                     
-                    # Add completion stage
                     task.update_progress("wrapping_up", 99.8, f"Wrapping up processing after {round(total_processing_time, 2)} seconds")
                     
-                    # Update task result
                     task.complete(response_data)
                     
                     if clean_after:
@@ -834,7 +832,6 @@ def setup_routes(app):
                         except Exception as e:
                             logger.warning(f"Error cleaning directories after processing: {str(e)}")
                     
-                    # Clean up temporary directory
                     temp_dir = os.path.join(app_config['INPUTS_DIR_ABS'], f"temp_{task_id}")
                     if os.path.exists(temp_dir):
                         try:
@@ -846,7 +843,6 @@ def setup_routes(app):
                     logger.error(f"Error processing OMR: {str(e)}")
                     task.fail(f'Error processing OMR: {str(e)}')
                     
-                    # Clean up temporary directory even on failure
                     temp_dir = os.path.join(app_config['INPUTS_DIR_ABS'], f"temp_{task_id}")
                     if os.path.exists(temp_dir):
                         try:
@@ -858,7 +854,6 @@ def setup_routes(app):
             logger.error(f"Unexpected error in task processing: {str(e)}")
             task.fail(f'Unexpected error: {str(e)}')
     
-    # Define API resources
     @ns.route('/process-omr')
     @ns.expect(parsers['upload_parser'])
     class ProcessOMR(Resource):
