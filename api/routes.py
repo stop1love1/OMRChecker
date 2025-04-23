@@ -476,14 +476,14 @@ def setup_routes(app):
                             
                             batch_profile = get_batch_profile(pdf_count)
                             
-                            high_dpi = 600
-                            high_quality = 100
+                            high_dpi = 900  # Tăng DPI lên 900 để có độ nét cao hơn (thay vì 300)
+                            high_quality = 100  # Tăng chất lượng lên 100 để có độ nét tối đa (thay vì 95)
                             
                             pdf_results = process_pdf_batch(
                                 pdf_files, 
                                 input_dir,
-                                dpi=high_dpi,
-                                quality=high_quality
+                                dpi=900,  # Tăng DPI lên 900 để có độ nét cao hơn
+                                quality=100  # Tăng chất lượng lên 100 để có độ nét tối đa
                             )
                             
                             extracted_images = 0
@@ -515,8 +515,8 @@ def setup_routes(app):
                                     new_image_paths = process_pdf(
                                         pdf_path, 
                                         input_dir,
-                                        dpi=600,
-                                        quality=100,
+                                        dpi=900,  # Tăng DPI lên 900 để có độ nét cao hơn
+                                        quality=100,  # Tăng chất lượng lên 100 để có độ nét tối đa
                                         max_workers=12
                                     )
                                     image_paths.extend(new_image_paths)
@@ -554,9 +554,19 @@ def setup_routes(app):
                         tuning_config.outputs.save_image_level = batch_profile["save_image_level"]
                         tuning_config.outputs.show_image_level = batch_profile["show_image_level"]
                     else:
-                        tuning_config.dimensions.processing_width = 1200
+                        tuning_config.dimensions.processing_width = 1240
                         tuning_config.outputs.save_image_level = 0
                         tuning_config.outputs.show_image_level = 0
+                    
+                    # Tăng độ nhạy cho các trường hợp tô mờ
+                    # Giảm MIN_JUMP để nhận diện các sự thay đổi mức độ màu sắc nhỏ hơn
+                    tuning_config.threshold_params.MIN_JUMP = 15  # Giảm từ 25 xuống 15
+                    # Giảm MIN_GAP để chấp nhận khoảng cách nhỏ hơn giữa các giá trị cường độ
+                    tuning_config.threshold_params.MIN_GAP = 20   # Giảm từ 30 xuống 20
+                    # Tăng GAMMA_LOW để làm rõ nét các mục tô mờ
+                    tuning_config.threshold_params.GAMMA_LOW = 0.6  # Giảm từ 0.7 xuống 0.6
+                    # Tăng CONFIDENT_SURPLUS để có nhiều khả năng nhận diện hơn
+                    tuning_config.threshold_params.CONFIDENT_SURPLUS = 3  # Giảm từ 5 xuống 3
                     
                     template = Template(Path(template_path), tuning_config)
                     
@@ -1486,14 +1496,14 @@ def setup_routes(app):
                         batch_profile = get_batch_profile(len(pdf_files))
                         
                         # Tăng DPI và quality lên cao nhất cho độ nét tốt nhất
-                        high_dpi = 300  # Giá trị DPI cao hơn cho độ nét tốt
-                        high_quality = 95  # Giá trị quality cao hơn (max 100)
+                        high_dpi = 900  # Tăng DPI lên 900 để có độ nét cao hơn (thay vì 300)
+                        high_quality = 100  # Tăng chất lượng lên 100 để có độ nét tối đa (thay vì 95)
                         
                         pdf_results = process_pdf_batch(
                             pdf_files, 
                             input_dir,
-                            dpi=high_dpi,
-                            quality=high_quality
+                            dpi=900,  # Tăng DPI lên 900 để có độ nét cao hơn
+                            quality=100  # Tăng chất lượng lên 100 để có độ nét tối đa
                         )
                         
                         extracted_images = 0
@@ -1520,8 +1530,8 @@ def setup_routes(app):
                                 new_image_paths = process_pdf(
                                     pdf_path, 
                                     input_dir,
-                                    dpi=300,  # Tăng DPI từ 100 lên 300
-                                    quality=95,  # Tăng chất lượng từ 70 lên 95
+                                    dpi=900,  # Tăng DPI lên 900 để có độ nét cao hơn
+                                    quality=100,  # Tăng chất lượng lên 100 để có độ nét tối đa
                                     max_workers=12
                                 )
                                 image_paths.extend(new_image_paths)
@@ -1597,6 +1607,12 @@ def setup_routes(app):
                         tuning_config.dimensions.processing_width = 800
                         tuning_config.outputs.save_image_level = 0
                         tuning_config.outputs.show_image_level = 0
+                        
+                        # Tăng độ nhạy cho các trường hợp tô mờ
+                        tuning_config.threshold_params.MIN_JUMP = 15  # Giảm từ 25 xuống 15
+                        tuning_config.threshold_params.MIN_GAP = 20   # Giảm từ 30 xuống 20
+                        tuning_config.threshold_params.GAMMA_LOW = 0.6  # Giảm từ 0.7 xuống 0.6
+                        tuning_config.threshold_params.CONFIDENT_SURPLUS = 3  # Giảm từ 5 xuống 3
                         
                         subdir_template_path = os.path.join(subdir_path, 'template.json')
                         template = Template(Path(subdir_template_path), tuning_config)

@@ -119,6 +119,6 @@ def get_batch_profile(batch_size, high_speed=False, high_quality=True):
 
 IMAGE_SAVE_OPTIONS = {
     "format": "JPEG",              
-    "jpeg_quality": 95,            
+    "jpeg_quality": 100,            
     "png_compression": 1,          
 } 
