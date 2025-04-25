@@ -58,8 +58,8 @@ class Task:
         self.stage_details = ""
         self.estimated_remaining_time = None
         self.last_updated = time.time()
-        self.results_fetched = 0  # Track how many results have been fetched
-        self.temp_file_path = None  # Path to temp file with results
+        self.results_fetched = 0
+        self.temp_file_path = None
     
     def update_progress(self, stage, progress, details="", increment_processed=0):
         """Update task progress with stage information"""
@@ -92,22 +92,17 @@ class Task:
         
         # Save results to a temporary file
         try:
-            # Use app.config if available, otherwise fallback to default path
             if current_app:
                 temp_dir = current_app.config.get('TMP_DIR')
             if not temp_dir:
                 temp_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "tmp")
             
-            # Ensure directory exists
             os.makedirs(temp_dir, exist_ok=True)
             
-            # Generate a shorter filename to avoid path length issues
-            short_task_id = self.task_id[:8]  # Sử dụng 8 ký tự đầu của task_id để rút ngắn tên file
+            short_task_id = self.task_id[:8]
             self.temp_file_path = os.path.join(temp_dir, f"{short_task_id}.json")
             
-            # Attempt to store the full results in the temp file
             try:
-                # Add metadata to help identify the file
                 result_with_meta = result.copy()
                 result_with_meta['_meta'] = {
                     'task_id': self.task_id,
@@ -118,19 +113,16 @@ class Task:
                 with open(self.temp_file_path, 'w', encoding='utf-8') as f:
                     json.dump(result_with_meta, f, cls=CustomJSONEncoder)
                 
-                # Keep only basic info in memory
                 result_copy = result.copy()
                 if 'results' in result_copy:
-                    # Store total results count before clearing
                     total_results = len(result['results'])
-                    result_copy['results'] = []  # Clear results array to save memory
+                    result_copy['results'] = []
                     result_copy['total_results'] = total_results
                 self.result = result_copy
                 
                 logger.info(f"Saved complete task results to temporary file: {self.temp_file_path}")
             except json.JSONEncodeError as json_error:
                 logger.error(f"JSON encoding error: {str(json_error)}")
-                # Try to save without problematic fields
                 if 'results' in result:
                     for i, res in enumerate(result['results']):
                         if 'input_image_url' in res:
@@ -476,14 +468,14 @@ def setup_routes(app):
                             
                             batch_profile = get_batch_profile(pdf_count)
                             
-                            high_dpi = 900  # Tăng DPI lên 900 để có độ nét cao hơn (thay vì 300)
-                            high_quality = 100  # Tăng chất lượng lên 100 để có độ nét tối đa (thay vì 95)
+                            high_dpi = 900 
+                            high_quality = 100
                             
                             pdf_results = process_pdf_batch(
                                 pdf_files, 
                                 input_dir,
-                                dpi=900,  # Tăng DPI lên 900 để có độ nét cao hơn
-                                quality=100  # Tăng chất lượng lên 100 để có độ nét tối đa
+                                dpi=high_dpi,
+                                quality=high_quality
                             )
                             
                             extracted_images = 0
@@ -499,7 +491,7 @@ def setup_routes(app):
                             pdf_total_time = time.time() - pdf_start_time
                             logger.info(f"Batch PDF processing completed in {pdf_total_time:.2f} seconds for {pdf_count} PDFs")
                             # No task object in batch processing
-                            # task.update_progress("pdf_processing", 70, f"Extracted {extracted_images} images from {pdf_count} PDF files")
+                            task.update_progress("pdf_processing", 70, f"Extracted {extracted_images} images from {pdf_count} PDF files")
                             
                         except Exception as batch_error:
                             logger.error(f"Error in batch PDF processing: {str(batch_error)}")
@@ -516,8 +508,8 @@ def setup_routes(app):
                                     new_image_paths = process_pdf(
                                         pdf_path, 
                                         input_dir,
-                                        dpi=900,  # Tăng DPI lên 900 để có độ nét cao hơn
-                                        quality=100,  # Tăng chất lượng lên 100 để có độ nét tối đa
+                                        dpi=high_dpi,
+                                        quality=high_quality,
                                         max_workers=12
                                     )
                                     image_paths.extend(new_image_paths)
@@ -564,12 +556,6 @@ def setup_routes(app):
                         tuning_config.dimensions.processing_width = 1240
                         tuning_config.outputs.save_image_level = 0
                         tuning_config.outputs.show_image_level = 0
-                    
-                    # Tăng độ nhạy cho các trường hợp tô mờ
-                    tuning_config.threshold_params.MIN_JUMP = 15  # Giảm từ 25 xuống 15
-                    tuning_config.threshold_params.MIN_GAP = 20   # Giảm từ 30 xuống 20
-                    tuning_config.threshold_params.GAMMA_LOW = 0.6  # Giảm từ 0.7 xuống 0.6
-                    tuning_config.threshold_params.CONFIDENT_SURPLUS = 3  # Giảm từ 5 xuống 3
                     
                     template = Template(Path(template_path), tuning_config)
                     
@@ -1644,16 +1630,15 @@ def setup_routes(app):
                         tuning_config.outputs.save_image_level = 0
                         tuning_config.outputs.show_image_level = 0
                         
-                        # Tăng độ nhạy cho các trường hợp tô mờ
-                        tuning_config.threshold_params.MIN_JUMP = 15  # Giảm từ 25 xuống 15
-                        tuning_config.threshold_params.MIN_GAP = 20   # Giảm từ 30 xuống 20
-                        tuning_config.threshold_params.GAMMA_LOW = 0.6  # Giảm từ 0.7 xuống 0.6
-                        tuning_config.threshold_params.CONFIDENT_SURPLUS = 3  # Giảm từ 5 xuống 3
+                        tuning_config.threshold_params.MIN_JUMP = 15
+                        tuning_config.threshold_params.MIN_GAP = 20
+                        tuning_config.threshold_params.GAMMA_LOW = 0.6
+                        tuning_config.threshold_params.CONFIDENT_SURPLUS = 3
                         
                         subdir_template_path = os.path.join(subdir_path, 'template.json')
                         template = Template(Path(subdir_template_path), tuning_config)
                         
-                        subdir_results = process_dir(
+                        process_dir(
                             Path(app.config['INPUTS_DIR_ABS']),
                             Path(subdir_path),
                             api_args,

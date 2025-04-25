@@ -450,8 +450,8 @@ def _process_pdf_page(pdf_document, page_number, matrix, pdf_name, output_dir):
             annots=False  # Skip annotations for speed
         )
         
-        # Save with compression
-        pix.save(img_path, output="jpeg", jpg_quality=90)
+        # Save without jpg_quality parameter
+        pix.save(img_path, output="jpeg")
         
         # Explicitly release memory
         pix = None
