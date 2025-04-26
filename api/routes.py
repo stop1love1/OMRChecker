@@ -773,28 +773,10 @@ def setup_routes(app):
                                     logger.warning(f"Output image path does not exist: {output_image_path}")
                                     output_image_path = None
                             
-                            public_input_image = None
-                            public_output_image = None
-                            
                             os.makedirs(app_config['PUBLIC_IMAGES_DIR_ABS'], exist_ok=True)
                             
-                            if input_image_path and os.path.exists(input_image_path):
-                                try:
-                                    if os.name == 'nt' and len(input_image_path) > 250:
-                                        input_image_path_unc = "\\\\?\\" + os.path.abspath(input_image_path)
-                                    else:
-                                        input_image_path_unc = input_image_path
-                                        
-                                    public_input_image = save_to_public_images(
-                                        input_image_path_unc, 
-                                        "input", 
-                                        app_config['API_HOST'], 
-                                        app_config['PUBLIC_IMAGES_DIR_ABS']
-                                    )
-                                    if public_input_image:
-                                        transformed_result['input_image_url'] = public_input_image
-                                except Exception as e:
-                                    logger.warning(f"Error saving input image to public folder: {str(e)}")
+                            # Skip saving input images as requested
+                            transformed_result['input_image_url'] = None
                             
                             if output_image_path and os.path.exists(output_image_path):
                                 try:
@@ -825,7 +807,7 @@ def setup_routes(app):
                     task.update_progress("calculating_stats", 99.2, f"Calculating result statistics")
                     
                     total_processed = len(clean_results)
-                    results_with_images = sum(1 for r in clean_results if 'input_image_url' in r or 'output_image_url' in r)
+                    results_with_images = sum(1 for r in clean_results if 'output_image_url' in r)
                     
                     task.update_progress("formatting_results", 99.4, f"Formatting {total_processed} results ({results_with_images} with images)")
                     
